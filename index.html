@@ -554,7 +554,7 @@ label{display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bot
       </div>
       <div class="card">
         <div class="card-title">🔬 EMERGENT PATTERNS — Hidden conditional rules</div>
-        <p style="font-size:11px;color:var(--muted);margin-bottom:10px;line-height:1.5">Rules discovered from prediction-outcome history. ✅ Triggered rules promote codes into the top-3 prediction.</p>
+        <p style="font-size:11px;color:var(--muted);margin-bottom:10px;line-height:1.5">Rules discovered from prediction-outcome history. ✅ Triggered rules promote codes into the top-5 prediction.</p>
         <div id="emergent-content"></div>
       </div>
       <div class="card">
@@ -583,7 +583,7 @@ label{display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bot
       </div>
       <div class="card">
         <div class="card-title">🧪 BACKTEST — Slot coverage accuracy</div>
-        <p style="font-size:12px;color:var(--muted);margin-bottom:10px;line-height:1.5">Measures how many actual refill slots were covered by top-3 predictions on held-out data.</p>
+        <p style="font-size:12px;color:var(--muted);margin-bottom:10px;line-height:1.5">Measures how many actual refill slots were covered by top-5 predictions on held-out data.</p>
         <button class="btn btn-secondary" onclick="runBacktest()">▶ Run Backtest</button>
         <div id="backtest-results" style="margin-top:12px"></div>
       </div>
@@ -630,6 +630,12 @@ label{display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bot
       <div class="card" id="historical-similarity-card" style="display:none">
         <div class="card-title">🕐 HISTORICAL SIMILARITY — Closest past sequences</div>
         <div id="historical-similarity"></div>
+      </div>
+
+      <!-- SCORE THRESHOLDS -->
+      <div class="card" id="threshold-card">
+        <div class="card-title">📐 SCORE THRESHOLDS — Hit & surprise zones</div>
+        <div id="predict-thresholds"></div>
       </div>
 
       <!-- EMERGENT PATTERNS -->
@@ -1402,6 +1408,8 @@ function autoSavePrediction(letter){
     createdDate:lastEntryDate,
     targetDate:null,
     predictedCodes:top5.map(function(x){return x[0];}),
+    promotedCodes:(result.promotions||[]).map(function(p){return p.promoted;}),
+    watchoutCodes:(result.watchouts||[]).map(function(w){return w.code;}),
     scores:top5.reduce(function(o,x){o[x[0]]=x[1];return o;},{}),
     signalSnapshot:(function(){
       var snap={};
@@ -2715,6 +2723,155 @@ function buildCodeConfidenceGrade(code, snap, weights, entries, preds, letter, s
     consensus:consensus,obsState:obs.state};
 }
 
+function renderThresholds(entries, preds, top5Codes, bcsResult, containerId){
+  var el=document.getElementById(containerId);
+  if(!el) return;
+
+  var shopT=buildShopThresholds(entries,preds);
+  var surpriseT=buildSurpriseThreshold(entries,preds);
+
+  if(!shopT&&!surpriseT){
+    el.innerHTML='<p style="font-size:12px;color:var(--muted)">Need 5+ resolved predictions to establish thresholds.</p>';
+    return;
+  }
+
+  var scores=bcsResult.scores||{};
+  var localMax=Math.max.apply(null,Object.values(scores).concat([0.001]));
+
+  var html='';
+
+  // ── Shop hit threshold ──
+  if(shopT){
+    html+='<div style="margin-bottom:12px">'
+      +'<div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:5px">'
+      +'🎯 Prediction hit threshold'
+      +(shopT.shopThreshold!==null
+        ?'<span style="font-family:var(--mono);font-weight:900;color:var(--green);margin-left:8px">'+shopT.shopThreshold+'%+</span>'
+        :'<span style="font-size:10px;color:var(--muted);margin-left:8px">not yet established</span>')
+      +'</div>'
+      +'<div style="font-size:11px;color:var(--muted);margin-bottom:6px">'
+      +(shopT.shopThreshold!==null
+        ?'Codes scoring ≥'+shopT.shopThreshold+'% have historically hit at a reliable rate. Overall hit rate: '+shopT.overallHitRate+'%.'
+        :'More predictions needed to establish a reliable hit zone.')
+      +'</div>';
+
+    // Score band chart
+    html+='<div style="display:grid;grid-template-columns:repeat('+shopT.bands.length+',1fr);gap:2px;height:50px;align-items:end;margin-bottom:3px">';
+    var maxHR=Math.max.apply(null,shopT.bands.map(function(b){return b.hitRate;}));
+    shopT.bands.forEach(function(b){
+      var h=maxHR>0?Math.round(b.hitRate/100*46):2;
+      var isAbove=shopT.shopThreshold!==null&&b.lo>=shopT.shopThreshold;
+      var col=b.hitRate>=70?'var(--green)':b.hitRate>=50?'var(--gold)':'var(--red)';
+      var hasPred=top5Codes.some(function(c){
+        var s=Math.round((scores[c]||0)/localMax*100);
+        return s>=b.lo&&s<b.hi;
+      });
+      html+='<div style="display:flex;flex-direction:column;align-items:center;gap:1px">'
+        +'<div style="font-size:9px;color:'+col+';height:12px;line-height:12px">'+b.hitRate+'%</div>'
+        +'<div style="width:100%;height:'+h+'px;background:'+col+';border-radius:2px 2px 0 0;opacity:'+(isAbove?'1':'0.4')+'"></div>'
+        +(hasPred?'<div style="width:6px;height:6px;border-radius:50%;background:var(--accent)"></div>':'<div style="height:6px"></div>')
+        +'</div>';
+    });
+    html+='</div>';
+
+    // Band labels
+    html+='<div style="display:grid;grid-template-columns:repeat('+shopT.bands.length+',1fr);gap:2px">';
+    shopT.bands.forEach(function(b){
+      html+='<div style="font-size:8px;color:var(--muted);text-align:center">'+b.lo+'</div>';
+    });
+    html+='</div>';
+
+    // Top-5 positions vs threshold
+    if(shopT.shopThreshold!==null){
+      var aboveThresh=top5Codes.filter(function(c){
+        return Math.round((scores[c]||0)/localMax*100)>=shopT.shopThreshold;
+      });
+      var belowThresh=top5Codes.filter(function(c){
+        return Math.round((scores[c]||0)/localMax*100)<shopT.shopThreshold;
+      });
+      html+='<div style="margin-top:8px;font-size:11px">';
+      if(aboveThresh.length){
+        html+='<span style="color:var(--green)">▲ Above threshold: '
+          +aboveThresh.map(function(c){
+            return '<strong style="font-family:var(--mono)">'+c+'</strong>';
+          }).join(' ')+'</span>';
+      }
+      if(belowThresh.length){
+        html+=(aboveThresh.length?' &nbsp;':'')+'<span style="color:var(--muted)">▼ Below: '
+          +belowThresh.map(function(c){
+            return '<strong style="font-family:var(--mono)">'+c+'</strong>';
+          }).join(' ')+'</span>';
+      }
+      html+='</div>';
+    }
+    html+='</div>';
+  }
+
+  // ── Surprise hit threshold ──
+  if(surpriseT){
+    html+='<div style="padding-top:10px;border-top:1px solid var(--border)">'
+      +'<div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:5px">'
+      +'🎯 Surprise hit zone'
+      +(surpriseT.surpriseThreshold!==null
+        ?'<span style="font-family:var(--mono);font-weight:900;color:var(--sig-momentum);margin-left:8px">'+surpriseT.surpriseThreshold+'%+</span>'
+        :'<span style="font-size:10px;color:var(--muted);margin-left:8px">not yet established</span>')
+      +'</div>'
+      +'<div style="font-size:11px;color:var(--muted);margin-bottom:6px">'
+      +(surpriseT.surpriseThreshold!==null
+        ?'Non-predicted codes scoring ≥'+surpriseT.surpriseThreshold+'% have appeared as surprises at above-average rate. Watch these codes even outside the top-5.'
+        :'Not enough surprise history to establish a surprise zone.')
+      +'</div>';
+
+    // Surprise band chart
+    html+='<div style="display:grid;grid-template-columns:repeat('+surpriseT.bands.length+',1fr);gap:2px;height:40px;align-items:end;margin-bottom:3px">';
+    var maxAR=Math.max.apply(null,surpriseT.bands.map(function(b){return b.appearRate;}));
+    surpriseT.bands.forEach(function(b){
+      var h=maxAR>0?Math.round(b.appearRate/maxAR*36):2;
+      var isAbove=surpriseT.surpriseThreshold!==null&&b.lo>=surpriseT.surpriseThreshold;
+      var col=b.appearRate>=surpriseT.overallSurpriseRate+15?'var(--sig-momentum)':b.appearRate>=surpriseT.overallSurpriseRate?'var(--gold)':'var(--muted)';
+      html+='<div style="display:flex;flex-direction:column;align-items:center;gap:1px">'
+        +'<div style="font-size:9px;color:'+col+';height:11px;line-height:11px">'+(b.appearRate>0?b.appearRate+'%':'')+'</div>'
+        +'<div style="width:100%;height:'+h+'px;background:'+col+';border-radius:2px 2px 0 0;opacity:'+(isAbove?'1':'0.35')+'"></div>'
+        +'</div>';
+    });
+    html+='</div>';
+
+    // Band labels
+    html+='<div style="display:grid;grid-template-columns:repeat('+surpriseT.bands.length+',1fr);gap:2px">';
+    surpriseT.bands.forEach(function(b){
+      html+='<div style="font-size:8px;color:var(--muted);text-align:center">'+b.lo+'</div>';
+    });
+    html+='</div>';
+
+    // Identify current non-top5 codes in the surprise zone
+    if(surpriseT.surpriseThreshold!==null){
+      var inSurpriseZone=Object.entries(scores)
+        .filter(function(x){
+          return top5Codes.indexOf(x[0])===-1
+            &&Math.round(x[1]/localMax*100)>=surpriseT.surpriseThreshold;
+        })
+        .sort(function(a,b){return b[1]-a[1];})
+        .slice(0,5);
+      if(inSurpriseZone.length){
+        html+='<div style="margin-top:8px;font-size:11px;color:var(--sig-momentum)">'
+          +'Currently in surprise zone: '
+          +inSurpriseZone.map(function(x){
+            var pct=Math.round(x[1]/localMax*100);
+            return '<strong style="font-family:var(--mono)">'+x[0]+'</strong>'
+              +'<span style="font-size:10px;color:var(--muted)"> '+pct+'%</span>';
+          }).join(' ')
+          +'</div>';
+      }
+    }
+    html+='<div style="font-size:10px;color:var(--muted);margin-top:5px">'
+      +'Based on '+surpriseT.resolvedCount+' resolved predictions · Overall surprise rate: '+surpriseT.overallSurpriseRate+'%'
+      +'</div>'
+      +'</div>';
+  }
+
+  el.innerHTML=html;
+}
+
 function renderWatchoutsHtml(watchouts){
   if(!watchouts.length) return '';
 
@@ -3141,6 +3298,140 @@ function buildScoreThreshold(code, entries, preds){
       : reliability==='emerging'
       ? 'Threshold at '+threshold+'%: '+aboveHitRate+'% vs '+(belowHitRate||0)+'% — emerging pattern. Need more predictions.'
       : 'Insufficient data for reliable threshold (need 5+ resolved predictions).'
+  };
+}
+
+// ── SHOP-LEVEL HIT THRESHOLD ───────────────
+// Aggregates score vs hit data across ALL predicted codes to find
+// the shop-level empirical threshold — the score % where predictions
+// become reliably correct overall, regardless of which specific code.
+// Also identifies the "dead zone" — scores where hits and misses are random.
+function buildShopThresholds(entries, preds){
+  var resolved=preds.filter(function(p){
+    return p.status!=='pending'&&p.outcome&&p.scores&&p.predictedCodes;
+  });
+  if(resolved.length<5) return null;
+
+  // Collect all (normScore, hit) pairs across every predicted code in every prediction
+  var maxS=0;
+  resolved.forEach(function(p){
+    var m=Math.max.apply(null,Object.values(p.scores).concat([0.001]));
+    if(m>maxS) maxS=m;
+  });
+
+  var pairs=[];
+  resolved.forEach(function(p){
+    var localMax=Math.max.apply(null,Object.values(p.scores).concat([0.001]));
+    p.predictedCodes.forEach(function(c){
+      var normScore=Math.round((p.scores[c]||0)/localMax*100);
+      var hit=p.outcome[c]==='hit'?1:0;
+      pairs.push({score:normScore,hit:hit,code:c});
+    });
+  });
+
+  pairs.sort(function(a,b){return a.score-b.score;});
+
+  // Bucket into 10% bands and compute hit rate per band
+  var bands=[];
+  for(var b=0;b<10;b++){
+    var lo=b*10,hi=(b+1)*10;
+    var inBand=pairs.filter(function(x){return x.score>=lo&&x.score<hi;});
+    if(inBand.length>0){
+      var hitRate=Math.round(inBand.filter(function(x){return x.hit;}).length/inBand.length*100);
+      bands.push({lo:lo,hi:hi,n:inBand.length,hitRate:hitRate});
+    }
+  }
+
+  // Find the reliable hit threshold — lowest score band where hit rate stays ≥60%
+  // consistently from that band upward
+  var shopThreshold=null;
+  for(var i=bands.length-1;i>=0;i--){
+    var allAbove=bands.slice(i);
+    var aboveN=allAbove.reduce(function(a,b){return a+b.n;},0);
+    var aboveH=allAbove.reduce(function(a,b){return a+Math.round(b.hitRate*b.n/100);},0);
+    var aboveRate=aboveN>0?Math.round(aboveH/aboveN*100):0;
+    if(aboveRate>=60&&aboveN>=3){
+      shopThreshold=bands[i].lo;
+    }
+  }
+
+  // Surprise zone — score bands where surprise hit rate is highest
+  // (these are the bands where we under-predict)
+  var overallHitRate=Math.round(pairs.filter(function(x){return x.hit;}).length/pairs.length*100);
+  var deadZone=bands.filter(function(b){
+    return Math.abs(b.hitRate-overallHitRate)<10&&b.n>=3;
+  }); // bands where score doesn't discriminate
+
+  return {
+    bands:bands,
+    shopThreshold:shopThreshold,
+    overallHitRate:overallHitRate,
+    deadZone:deadZone,
+    totalPairs:pairs.length,
+    resolvedCount:resolved.length
+  };
+}
+
+// ── SURPRISE HIT THRESHOLD ─────────────────
+// For codes that arrived as surprises (not in top-5),
+// finds the score % at which they reliably appear.
+// Uses the same score ranking — surprise codes have scores too,
+// they just weren't high enough to make the top-5.
+function buildSurpriseThreshold(entries, preds){
+  var resolved=preds.filter(function(p){
+    return p.status!=='pending'&&p.outcome&&p.scores&&p.actualCodes;
+  });
+  if(resolved.length<5) return null;
+
+  // For each prediction, find surprise codes and their scores
+  var surprisePairs=[];
+  resolved.forEach(function(p){
+    var localMax=Math.max.apply(null,Object.values(p.scores).concat([0.001]));
+    var surprises=Array.from(new Set((p.actualCodes||[]).filter(function(c){
+      return p.predictedCodes.indexOf(c)===-1;
+    })));
+    // All non-predicted codes that WERE scored — bucket them as (score, appeared)
+    Object.keys(p.scores).forEach(function(c){
+      if(p.predictedCodes.indexOf(c)>-1) return; // skip predicted codes
+      var normScore=Math.round((p.scores[c]||0)/localMax*100);
+      var appeared=surprises.indexOf(c)>-1?1:0;
+      surprisePairs.push({score:normScore,appeared:appeared,code:c});
+    });
+  });
+
+  if(surprisePairs.length<10) return null;
+
+  surprisePairs.sort(function(a,b){return a.score-b.score;});
+
+  // Bucket into 10% bands
+  var bands=[];
+  for(var b=0;b<10;b++){
+    var lo=b*10,hi=(b+1)*10;
+    var inBand=surprisePairs.filter(function(x){return x.score>=lo&&x.score<hi;});
+    if(inBand.length>0){
+      var appearRate=Math.round(inBand.filter(function(x){return x.appeared;}).length/inBand.length*100);
+      bands.push({lo:lo,hi:hi,n:inBand.length,appearRate:appearRate});
+    }
+  }
+
+  // Surprise threshold — the score band above which non-predicted codes
+  // appear at a meaningfully higher rate than average
+  var overallSurpriseRate=Math.round(surprisePairs.filter(function(x){return x.appeared;}).length/surprisePairs.length*100);
+  var surpriseThreshold=null;
+  for(var i=bands.length-1;i>=0;i--){
+    var band=bands[i];
+    if(band.appearRate>=overallSurpriseRate+15&&band.n>=3){
+      surpriseThreshold=band.lo;
+      break;
+    }
+  }
+
+  return {
+    bands:bands,
+    surpriseThreshold:surpriseThreshold,
+    overallSurpriseRate:overallSurpriseRate,
+    totalPairs:surprisePairs.length,
+    resolvedCount:resolved.length
   };
 }
 
@@ -5053,10 +5344,40 @@ function renderAnalytics(){
     var sigLifts=bcsForSig.signalLifts||{};
     var wEff=bcsForSig.weights||{};
     var hasLifts=Object.keys(sigLifts).length>0;
+
+    // Compute per-signal hit rates across all predicted codes
+    var sigHitRates={};
+    if(resolved.length>=3){
+      SIGNAL_KEYS.forEach(function(k){
+        var highTotal=0,highHits=0,lowTotal=0,lowHits=0;
+        resolved.forEach(function(p){
+          p.predictedCodes.forEach(function(c){
+            var snap=p.signalSnapshot&&p.signalSnapshot[c];
+            if(!snap) return;
+            var val=snap[k]||0;
+            var isHit=p.outcome&&p.outcome[c]==='hit'?1:0;
+            if(val>=0.6){highTotal++;highHits+=isHit;}
+            else if(val<=0.35){lowTotal++;lowHits+=isHit;}
+          });
+        });
+        sigHitRates[k]={
+          highHitRate:highTotal>=2?Math.round(highHits/highTotal*100):null,
+          lowHitRate:lowTotal>=2?Math.round(lowHits/lowTotal*100):null,
+          highN:highTotal,lowN:lowTotal
+        };
+      });
+    }
+
     var sigHtml2='<div style="font-size:11px;color:var(--muted);margin-bottom:8px">'
       +(hasLifts
-        ?'Effective weights blend stored weights (60%) with outcome-correlated lift (40%). Signals with negative lift are down-weighted automatically.'
-        :'Need 5+ resolved predictions to compute signal lift. Showing stored weights.')
+        ?'Effective weights blend stored (60%) + outcome lift (40%). Hit rate when signal is HIGH vs LOW shows actual predictive power.'
+        :'Need 5+ resolved predictions to compute lift. Showing stored weights.')
+      +'</div>'
+      // Column header
+      +'<div style="font-size:9px;color:var(--muted);display:grid;grid-template-columns:8px 90px 1fr 36px 36px 36px 50px;gap:4px;padding:2px 0;border-bottom:1px solid var(--border);margin-bottom:3px">'
+      +'<span></span><span>SIGNAL</span><span>WEIGHT</span><span style="text-align:right">WT%</span>'
+      +'<span style="text-align:right">HIGH</span><span style="text-align:right">LOW</span>'
+      +'<span style="text-align:right">VERDICT</span>'
       +'</div>';
 
     var sigRows=SIGNAL_KEYS.map(function(k){
@@ -5065,23 +5386,33 @@ function renderAnalytics(){
       var lift=hasLifts&&sigLifts[k]!==undefined?sigLifts[k]:null;
       var liftPct=lift!==null?Math.round(lift*100):null;
       var liftCol=liftPct===null?'var(--muted)':liftPct>=15?'var(--green)':liftPct>=-5?'var(--gold)':'var(--red)';
-      var badge=liftPct===null?'':liftPct>=15?'<span style="font-size:9px;background:rgba(62,207,142,.15);color:var(--green);padding:1px 5px;border-radius:6px">KEY</span>'
+      var badge=liftPct===null?''
+        :liftPct>=15?'<span style="font-size:9px;background:rgba(62,207,142,.15);color:var(--green);padding:1px 5px;border-radius:6px">KEY</span>'
         :liftPct>=-5?'<span style="font-size:9px;background:rgba(245,169,74,.15);color:var(--gold);padding:1px 5px;border-radius:6px">USEFUL</span>'
         :'<span style="font-size:9px;background:rgba(107,114,128,.15);color:var(--muted);padding:1px 5px;border-radius:6px">NOISE</span>';
       var sigCol=SIGNAL_COLORS[k]||'var(--muted)';
-      return '<div style="display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid var(--border)">'
-        +'<div style="width:8px;height:8px;border-radius:50%;background:'+sigCol+';flex-shrink:0"></div>'
-        +'<span style="font-size:11px;color:var(--muted);min-width:90px">'+(SIGNAL_NAMES[k]||k)+'</span>'
-        +'<div style="flex:1;height:5px;background:var(--surface2);border-radius:3px;overflow:hidden">'
+
+      var hr=sigHitRates[k]||{};
+      var highCol=hr.highHitRate!==null?(hr.highHitRate>=60?'var(--green)':hr.highHitRate>=30?'var(--gold)':'var(--red)'):'var(--muted)';
+      var lowCol=hr.lowHitRate!==null?(hr.lowHitRate>=60?'var(--green)':hr.lowHitRate>=30?'var(--gold)':'var(--red)'):'var(--muted)';
+
+      return '<div style="display:grid;grid-template-columns:8px 90px 1fr 36px 36px 36px 50px;gap:4px;align-items:center;padding:5px 0;border-bottom:1px solid var(--border)">'
+        +'<div style="width:7px;height:7px;border-radius:50%;background:'+sigCol+'"></div>'
+        +'<span style="font-size:11px;color:var(--muted)">'+(SIGNAL_NAMES[k]||k)+'</span>'
+        +'<div style="height:5px;background:var(--surface2);border-radius:3px;overflow:hidden">'
           +'<div style="width:'+ew+'%;height:100%;background:'+sigCol+'"></div>'
         +'</div>'
-        +'<span style="font-size:11px;font-family:var(--mono);font-weight:700;color:'+sigCol+';min-width:28px">'+ew+'%</span>'
-        +(stored!==ew?'<span style="font-size:9px;color:var(--muted)">(stored '+stored+'%)</span>':'')
-        +(liftPct!==null?'<span style="font-size:10px;font-family:var(--mono);color:'+liftCol+';min-width:36px;text-align:right">'+(liftPct>0?'+':'')+liftPct+'%</span>':'')
+        +'<span style="font-size:11px;font-family:var(--mono);font-weight:700;color:'+sigCol+';text-align:right">'+ew+'%'
+          +(stored!==ew?'<span style="font-size:9px;color:var(--muted)"> ('+stored+')</span>':'')
+        +'</span>'
+        +'<span style="font-size:11px;font-family:var(--mono);font-weight:700;color:'+highCol+';text-align:right">'+(hr.highHitRate!==null?hr.highHitRate+'%':'—')+'</span>'
+        +'<span style="font-size:11px;font-family:var(--mono);color:'+lowCol+';text-align:right">'+(hr.lowHitRate!==null?hr.lowHitRate+'%':'—')+'</span>'
         +badge
         +'</div>';
     }).join('');
-    sigEffEl.innerHTML=sigHtml2+sigRows;
+
+    sigEffEl.innerHTML=sigHtml2+sigRows
+      +'<div style="font-size:9px;color:var(--muted);margin-top:5px">HIGH = signal value ≥0.6 at prediction time · LOW = ≤0.35 · Needs 2+ cases per category</div>';
   }
 
   // ── PROCESSED: Lessons Learned ──
@@ -5176,7 +5507,7 @@ function runBacktest(){
   var overall=totalSlots>0?Math.round(coveredSlots/totalSlots*100):0;
   var cls=overall>=40?'alert-success':overall>=20?'alert-warn':'alert-error';
   document.getElementById('backtest-results').innerHTML=
-    '<div class="alert '+cls+'">Slot coverage: <strong>'+overall+'%</strong> — top-3 codes covered '+coveredSlots+' of '+totalSlots+' actual slots across '+holdN+' held-out refill'+(holdN>1?'s':'')+'</div>'
+    '<div class="alert '+cls+'">Slot coverage: <strong>'+overall+'%</strong> — top-5 codes covered '+coveredSlots+' of '+totalSlots+' actual slots across '+holdN+' held-out refill'+(holdN>1?'s':'')+'</div>'
     +rows.join('')
     +'<div style="font-size:10px;color:var(--muted);margin-top:5px">Trained on '+train.length+' entries · Slot coverage = how many refill slots were filled by top-5 predicted codes</div>';
 }
@@ -6105,6 +6436,9 @@ function renderDashboard(){
     if(fullRankEl) fullRankEl.innerHTML=(fullRankEl.innerHTML||'')+retireNote;
   }
 
+  // ── Score thresholds ──
+  renderThresholds(entries, preds, top5CodesForCooccur, bcsResult, 'predict-thresholds');
+
   // ── Co-occurrence implications ──
   renderCooccurImplications(entries, top5CodesForCooccur, 'predict-cooccur');
 
@@ -6315,8 +6649,11 @@ function predCardHTML(pred, canResolve){
     var icon=outcome==='hit'?'✓':outcome==='miss'?'✗':outcome==='partial'?'~':'';
     var col=outcome==='hit'?'var(--green)':outcome==='miss'?'var(--red)':outcome==='partial'?'var(--gold)':'var(--muted)';
     var scorePct=maxScore>0?Math.round((scores[c]||0)/maxScore*100):0;
+    // Check if this code was promoted by a pattern
+    var promoted=pred.promotedCodes&&pred.promotedCodes.indexOf(c)>-1;
     return '<div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">'
       +'<span style="font-family:var(--mono);font-weight:800;font-size:13px;min-width:26px;color:'+(outcome?col:'var(--accent)')+'">'+c+'</span>'
+      +(promoted?'<span style="font-size:9px;color:var(--green);flex-shrink:0">🔬</span>':'')
       +(icon?'<span style="font-size:11px;color:'+col+'">'+icon+'</span>':'')
       +'<div style="flex:1;height:5px;background:var(--surface);border-radius:3px;overflow:hidden">'
       +'<div style="width:'+scorePct+'%;height:100%;background:'+col+';border-radius:3px"></div></div>'
@@ -6337,16 +6674,38 @@ function predCardHTML(pred, canResolve){
       +'</div>';
   }
 
-  // Actual codes — compact, only show hits and surprises
+  // Surprise hits — codes that arrived but weren't predicted
   var actualRow='';
   if(pred.actualCodes&&pred.actualCodes.length&&pred.outcome){
     var uniqueActual=Array.from(new Set(pred.actualCodes));
     var surprises=uniqueActual.filter(function(c){return pred.predictedCodes.indexOf(c)===-1;});
     if(surprises.length){
-      actualRow='<div style="font-size:10px;color:var(--muted);margin-top:4px">'
-        +'Surprises: '+surprises.map(function(c){
-          return '<span style="font-family:var(--mono);font-weight:700;color:var(--accent2)">'+c+'</span>';
-        }).join(' ')+'</div>';
+      // Show surprise codes with their scores if available
+      actualRow='<div style="font-size:10px;margin-top:5px;padding:4px 6px;background:rgba(62,207,142,.06);border-radius:6px;border-left:2px solid rgba(62,207,142,.3)">'
+        +'<span style="color:var(--green);font-weight:700">+ Surprise: </span>'
+        +surprises.map(function(c){
+          var sc=scores[c];
+          var sPct=sc&&maxScore>0?Math.round(sc/maxScore*100):null;
+          return '<span style="font-family:var(--mono);font-weight:700;color:var(--sig-momentum)">'+c+'</span>'
+            +(sPct!==null?'<span style="font-size:9px;color:var(--muted)"> '+sPct+'%</span>':'');
+        }).join(' ')
+        +'</div>';
+    }
+  }
+
+  // Triggered watchouts that hit — codes not in top-5 but flagged and arrived
+  var watchoutRow='';
+  if(pred.watchoutCodes&&pred.actualCodes){
+    var watchoutHits=pred.watchoutCodes.filter(function(c){
+      return pred.actualCodes&&pred.actualCodes.indexOf(c)>-1;
+    });
+    if(watchoutHits.length){
+      watchoutRow='<div style="font-size:10px;margin-top:4px;padding:4px 6px;background:rgba(245,158,11,.06);border-radius:6px;border-left:2px solid rgba(245,158,11,.3)">'
+        +'<span style="color:var(--gold);font-weight:700">⚠️ Watchout hit: </span>'
+        +watchoutHits.map(function(c){
+          return '<span style="font-family:var(--mono);font-weight:700;color:var(--gold)">'+c+'</span>';
+        }).join(' ')
+        +'</div>';
     }
   }
 
@@ -6363,6 +6722,7 @@ function predCardHTML(pred, canResolve){
     +codePills
     +summaryLine
     +actualRow
+    +watchoutRow
     +(canResolve?'<div style="margin-top:6px">'+btns+'</div>':'')
     +'</div>';
 }
@@ -7034,7 +7394,7 @@ function buildGuideOutcome(){
     +'<strong>Update the model</strong> — signal weights are nudged based on the outcome (see Fine-tuning section). If it was a miss or partial, backtesting runs automatically.'
     +'</div></div>'
     +'<div class="guide-step"><div class="guide-step-num">4</div><div class="guide-step-body">'
-    +'<strong>Save next prediction</strong> — a fresh top-3 prediction is generated using the updated model and stored, ready to be compared against the next refill.'
+    +'<strong>Save next prediction</strong> — a fresh top-5 prediction is generated using the updated model and stored, ready to be compared against the next refill.'
     +'</div></div>'
     +'</div>'
     +'<div class="guide-callout"><strong>Result types:</strong> ✅ All Hit = all 3 codes appeared · ⚡ Partial = some hit, some missed · ❌ Miss = none appeared. Miss and Partial both trigger auto-backtest to diagnose model accuracy.</div>'
@@ -7088,7 +7448,7 @@ function buildGuideBacktest(){
     +'<p class="guide-p"><strong>What it does:</strong> holds out the most recent 25% of entries (capped at 3), trains the model on the rest, generates top-5 predicted codes, then checks how many appeared in each held-out entry.</p>'
     +'<div class="guide-example"><div class="ex-label">Reading the percentage</div>'
     +'<div style="font-size:12px;color:var(--muted);line-height:1.8">'
-    +'<span style="color:var(--green)">≥ 60%</span> — strong signal. Trust the top-3.<br>'
+    +'<span style="color:var(--green)">≥ 60%</span> — strong signal. Trust the top-5.<br>'
     +'<span style="color:var(--accent)">40–59%</span> — good. Use as a guide.<br>'
     +'<span style="color:var(--gold)">25–39%</span> — moderate. More data will help.<br>'
     +'<span style="color:var(--red)">&lt; 25%</span> — weak. Pattern unclear or insufficient data.'
@@ -7232,7 +7592,7 @@ function buildGuideWorkflow(){
     +'<br><span style="color:var(--gold)">After entering historical data in batch, go to <strong>💾 DATA → 🔧 Rebuild Predictions</strong> — this replays all entries in date order and generates correct resolved predictions. Track and Score will then show full performance history.</span>'
     +'</div></div>'
     +'<div class="guide-step"><div class="guide-step-num">3</div><div class="guide-step-body">'
-    +'<strong>Prediction auto-saves</strong> — from the 3rd entry onwards, a fresh top-3 is stored after every save. Nothing to tap.'
+    +'<strong>Prediction auto-saves</strong> — from the 3rd entry onwards, a fresh top-5 is stored after every save. Nothing to tap.'
     +'</div></div>'
     +'<div class="guide-step"><div class="guide-step-num">4</div><div class="guide-step-body">'
     +'<strong>Next refill arrives → enter it</strong> — a result card appears in Collect immediately showing hit/miss per code, slot coverage %, why it missed (dominant signal + consecutive miss count), what the model learned (signals that worked/failed), observation window state changes, and adaptive weight updates with z-scores.'
@@ -7761,39 +8121,64 @@ function renderEvidenceLedger(letter, containerId){
     return;
   }
 
-  var verdictLabels={proven:'✅ PROVEN',improving:'📈 IMPROVING',justified:'✅ JUSTIFIED',
-    neutral:'➡️ NEUTRAL',monitor:'👁 MONITOR',inconclusive:'❓ INCONCLUSIVE',
-    declining:'📉 DECLINING',disproven:'❌ DISPROVEN',ambiguous:'❓ AMBIGUOUS',pending:'⏳ PENDING'};
+  // Filter to PROVEN only — the signal is reliable enough to surface
+  var proven=ledger.filter(function(e){
+    return e.verdict==='proven'||e.verdict==='justified';
+  });
 
-  el.innerHTML=ledger.map(function(e){
-    var vLabel=verdictLabels[e.verdict]||e.verdict.toUpperCase();
-    var diff=e.after.rate-e.before.rate;
-    var diffStr=diff>0?'<span style="color:var(--green)">+'+diff+'%</span>':diff<0?'<span style="color:var(--red)">'+diff+'%</span>':'<span style="color:var(--muted)">—</span>';
+  // Sort by hit rate improvement (after.rate - before.rate) descending
+  proven.sort(function(a,b){
+    var liftA=(a.after.rate-a.before.rate);
+    var liftB=(b.after.rate-b.before.rate);
+    return liftB-liftA;
+  });
+
+  // Show count of non-proven entries
+  var nonProven=ledger.length-proven.length;
+  var header='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">'
+    +'<div style="font-size:11px;color:var(--muted)">'
+    +(proven.length?proven.length+' proven decision'+(proven.length>1?'s':''):'No proven decisions yet')
+    +'</div>'
+    +(nonProven?'<div style="font-size:10px;color:var(--muted)">'+nonProven+' pending/monitoring</div>':'')
+    +'</div>';
+
+  if(!proven.length){
+    el.innerHTML=header+'<p style="font-size:12px;color:var(--muted)">No decisions proven yet. Evidence builds as more predictions resolve. '
+      +(nonProven?nonProven+' decision'+(nonProven>1?'s are':' is')+' currently being monitored.':'')
+      +'</p>';
+    return;
+  }
+
+  var verdictLabels={proven:'✅ PROVEN',justified:'✅ JUSTIFIED'};
+
+  el.innerHTML=header+proven.map(function(e){
+    var vLabel=verdictLabels[e.verdict]||'✅';
+    var lift=e.after.rate-e.before.rate;
+    var liftStr=lift>0?'<span style="color:var(--green)">+'+lift+'%</span>':'<span style="color:var(--muted)">'+lift+'%</span>';
     return '<div style="padding:10px 0;border-bottom:1px solid var(--border)">'
       +'<div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:6px">'
-      +'<span style="font-size:16px;flex-shrink:0">'+e.icon+'</span>'
-      +'<div style="flex:1;min-width:0">'
-      +'<div style="font-size:12px;font-weight:700;color:var(--text)">'+e.title+'</div>'
-      +'<div style="font-size:10px;color:var(--muted);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+e.subtitle+'</div>'
+        +'<span style="font-size:16px;flex-shrink:0">'+e.icon+'</span>'
+        +'<div style="flex:1;min-width:0">'
+          +'<div style="font-size:12px;font-weight:700;color:var(--text)">'+e.title+'</div>'
+          +'<div style="font-size:10px;color:var(--muted);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+e.subtitle+'</div>'
+        +'</div>'
+        +'<span style="font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px;white-space:nowrap;background:rgba(62,207,142,.15);color:var(--green);flex-shrink:0">'+vLabel+'</span>'
       +'</div>'
-      +'<span style="font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px;white-space:nowrap;'
-      +'background:rgba(0,0,0,.2);color:'+e.verdictCol+';flex-shrink:0">'+vLabel+'</span>'
-      +'</div>'
-      +'<div style="display:grid;grid-template-columns:1fr 1fr 40px;gap:8px;margin-bottom:5px;align-items:center">'
-      +['before','after'].map(function(side){
-        var d=e[side];
-        var barCol=d.rate>=60?'var(--green)':d.rate>=30?'var(--gold)':'var(--red)';
-        return '<div>'
-          +'<div style="font-size:10px;color:var(--muted);margin-bottom:3px">'+d.label+' (n='+d.n+')</div>'
-          +'<div style="display:flex;align-items:center;gap:5px">'
-          +'<div style="flex:1;height:5px;background:var(--surface);border-radius:3px;overflow:hidden">'
-          +'<div style="width:'+d.rate+'%;height:100%;background:'+barCol+'"></div>'
-          +'</div>'
-          +'<span style="font-size:11px;font-family:var(--mono);font-weight:700;color:'+barCol+';min-width:30px">'+d.rate+'%</span>'
-          +'</div>'
+      +'<div style="display:grid;grid-template-columns:1fr 1fr 48px;gap:8px;margin-bottom:5px;align-items:center">'
+        +['before','after'].map(function(side){
+          var d=e[side];
+          var barCol=d.rate>=60?'var(--green)':d.rate>=30?'var(--gold)':'var(--red)';
+          return '<div>'
+            +'<div style="font-size:10px;color:var(--muted);margin-bottom:3px">'+d.label+' (n='+d.n+')</div>'
+            +'<div style="display:flex;align-items:center;gap:5px">'
+              +'<div style="flex:1;height:5px;background:var(--surface);border-radius:3px;overflow:hidden">'
+                +'<div style="width:'+d.rate+'%;height:100%;background:'+barCol+'"></div>'
+              +'</div>'
+              +'<span style="font-size:11px;font-family:var(--mono);font-weight:700;color:'+barCol+';min-width:30px">'+d.rate+'%</span>'
+            +'</div>'
           +'</div>';
-      }).join('')
-      +'<div style="text-align:center;font-size:13px;font-weight:700">'+diffStr+'</div>'
+        }).join('')
+        +'<div style="text-align:center;font-size:14px;font-weight:800">'+liftStr+'</div>'
       +'</div>'
       +'<div style="font-size:11px;color:var(--muted);line-height:1.5">'+e.detail+'</div>'
       +'</div>';
