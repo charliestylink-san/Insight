@@ -2364,7 +2364,7 @@ function buildRefillConfidenceScore(entries, preds, top5Codes, bcsResult, letter
   var breakdown=[];
   var total=0,maxPossible=0;
 
-  // Component 1: Average signal consensus across top-5 (30 pts)
+  // Component 1: Average signal consensus across top-5 (15 pts — prior, not outcome)
   var consensusSum=0;
   top5Codes.forEach(function(c){
     var snap=snaps[c]||{};
@@ -2372,13 +2372,12 @@ function buildRefillConfidenceScore(entries, preds, top5Codes, bcsResult, letter
     consensusSum+=cs.score;
   });
   var avgConsensus=top5Codes.length?consensusSum/top5Codes.length:50;
-  var consensusPts=Math.round(avgConsensus*0.30);
-  breakdown.push({label:'Signal consensus',pts:consensusPts,max:30,
+  var consensusPts=Math.round(avgConsensus*0.15);
+  breakdown.push({label:'Signal consensus',pts:consensusPts,max:15,
     detail:Math.round(avgConsensus)+'% avg across top-5'});
-  total+=consensusPts; maxPossible+=30;
+  total+=consensusPts; maxPossible+=15;
 
-  // Component 2: Observation window health (25 pts)
-  // Penalise confirmed/watching codes in top-5
+  // Component 2: Observation window health (20 pts)
   var obsPenaltySum=0;
   top5Codes.forEach(function(c){
     var cobs=obs[c]||{state:'idle'};
@@ -2386,12 +2385,12 @@ function buildRefillConfidenceScore(entries, preds, top5Codes, bcsResult, letter
     obsPenaltySum+=pen;
   });
   var obsHealth=Math.max(0,100-obsPenaltySum/top5Codes.length);
-  var obsPts=Math.round(obsHealth*0.25);
-  breakdown.push({label:'Obs window health',pts:obsPts,max:25,
+  var obsPts=Math.round(obsHealth*0.20);
+  breakdown.push({label:'Obs window health',pts:obsPts,max:20,
     detail:Math.round(obsHealth)+'% — '+top5Codes.filter(function(c){return obs[c]&&obs[c].state!=='idle';}).length+' code(s) penalised'});
-  total+=obsPts; maxPossible+=25;
+  total+=obsPts; maxPossible+=20;
 
-  // Component 3: Recent accuracy trend (25 pts)
+  // Component 3: Recent accuracy (45 pts — dominant: actual outcomes)
   var resolved=preds.filter(function(p){return p.status!=='pending'&&p.outcome;});
   var last5=resolved.slice(-5);
   var trendPts=0;
@@ -2401,24 +2400,24 @@ function buildRefillConfidenceScore(entries, preds, top5Codes, bcsResult, letter
       Object.values(p.outcome).forEach(function(v){last5T++;if(v==='hit')last5H++;});
     });
     var last5Rate=last5T>0?last5H/last5T:0;
-    trendPts=Math.round(last5Rate*25);
-    breakdown.push({label:'Recent accuracy',pts:trendPts,max:25,
+    trendPts=Math.round(last5Rate*45);
+    breakdown.push({label:'Recent accuracy',pts:trendPts,max:45,
       detail:Math.round(last5Rate*100)+'% code hit rate (last '+last5.length+')'});
   } else {
-    trendPts=12; // neutral if no history
-    breakdown.push({label:'Recent accuracy',pts:trendPts,max:25,detail:'Insufficient history'});
+    trendPts=15; // partial credit if no history yet
+    breakdown.push({label:'Recent accuracy',pts:trendPts,max:45,detail:'Insufficient history ('+last5.length+' preds)'});
   }
-  total+=trendPts; maxPossible+=25;
+  total+=trendPts; maxPossible+=45;
 
-  // Component 4: Regime stability (20 pts)
+  // Component 4: Pattern stability (20 pts)
   var regimePts=regime.shifting?Math.round((regime.overlapScore||0.5)*20):20;
   breakdown.push({label:'Pattern stability',pts:regimePts,max:20,
     detail:regime.shifting?'Shift detected ('+Math.round((regime.overlapScore||0)*100)+'% overlap)':'Stable'});
   total+=regimePts; maxPossible+=20;
 
   var score=Math.round(total/maxPossible*100);
-  var grade=score>=80?'A':score>=65?'B':score>=50?'C':score>=35?'D':'N';
-  var col=score>=80?'var(--green)':score>=65?'var(--accent)':score>=50?'var(--gold)':'var(--red)';
+  var grade=score>=75?'A':score>=60?'B':score>=45?'C':score>=30?'D':'N';
+  var col=score>=75?'var(--green)':score>=60?'var(--accent)':score>=45?'var(--gold)':'var(--red)';
 
   return {score:score,grade:grade,col:col,breakdown:breakdown,
     regimeShifting:regime.shifting};
@@ -2645,6 +2644,75 @@ function buildPlainEnglishSummary(entries, preds, top5Codes, bcsResult, letter){
   }
 
   return parts.join(' ');
+}
+
+// ── PER-CODE CONFIDENCE GRADE ─────────────
+// Combines signal consensus, threshold position, bias score,
+// observation window health, and momentum into a single A–N grade.
+// This answers: "how confident is the model that THIS code will appear?"
+function buildCodeConfidenceGrade(code, snap, weights, entries, preds, letter, scorePct){
+  var pts=0, maxPts=0;
+  var breakdown=[];
+
+  // 1. Signal consensus (25pts)
+  var consensus=buildSignalConsensus(code, snap, weights, weights);
+  var consPts=Math.round(consensus.score*0.25);
+  pts+=consPts; maxPts+=25;
+  breakdown.push({label:'Signals',pts:consPts,max:25,detail:consensus.yes+'↑ '+consensus.no+'↓'});
+
+  // 2. Hit rate at this score level — threshold (30pts)
+  var thresh=buildScoreThreshold(code,entries,preds);
+  var threshPts=0;
+  if(thresh&&thresh.reliability!=='insufficient'){
+    if(scorePct>=thresh.thresholdPct){
+      // Above threshold — use the proven above-threshold hit rate
+      threshPts=Math.round((thresh.hitRateAbove||50)/100*30);
+    } else {
+      // Below threshold — use below-threshold hit rate (lower)
+      threshPts=Math.round((thresh.hitRateBelowThreshold||20)/100*30);
+    }
+  } else {
+    // No threshold data — use appearance rate as proxy
+    var appRate=buildAppearanceRate(entries);
+    threshPts=Math.round((appRate[code]||0)*20); // conservative
+  }
+  pts+=threshPts; maxPts+=30;
+  breakdown.push({label:'Score threshold',pts:threshPts,max:30,
+    detail:thresh&&thresh.reliability!=='insufficient'
+      ?(scorePct>=thresh.thresholdPct?'▲ above ('+thresh.hitRateAbove+'% hit)':'▼ below ('+( thresh.hitRateBelowThreshold||0)+'% hit)')
+      :'Threshold pending'});
+
+  // 3. Bias score — historical hit rate when predicted (25pts)
+  var bias=buildBias(preds);
+  var biasVal=bias[code]!==undefined?bias[code]:0.5;
+  var biasPts=Math.round(biasVal*25);
+  pts+=biasPts; maxPts+=25;
+  var resolved=preds.filter(function(p){return p.status!=='pending'&&p.outcome&&p.predictedCodes.indexOf(code)>-1;});
+  breakdown.push({label:'Prediction bias',pts:biasPts,max:25,
+    detail:resolved.length?Math.round(biasVal*100)+'% hit rate ('+resolved.length+' preds)':'No prediction history'});
+
+  // 4. Observation window health (15pts)
+  var obs=letter?(shopObs(letter)[code]||{state:'idle'}):{state:'idle'};
+  var obsPenalty={idle:0,watching:30,recovering:20,confirmed:60,ambiguous:0}[obs.state]||0;
+  var obsHealth=Math.max(0,100-obsPenalty);
+  var obsPts=Math.round(obsHealth*0.15);
+  pts+=obsPts; maxPts+=15;
+  breakdown.push({label:'Obs window',pts:obsPts,max:15,
+    detail:obs.state==='idle'?'Clear':obs.state.toUpperCase()+(obs.state==='confirmed'?' (−40%)':obs.state==='watching'?' (−15%)':'')});
+
+  // 5. Momentum factor (5pts)
+  var momVal=snap.momentum||0.5;
+  var momPts=Math.round(Math.min(1,Math.max(0,momVal))*5);
+  pts+=momPts; maxPts+=5;
+  breakdown.push({label:'Momentum',pts:momPts,max:5,
+    detail:momVal>=0.65?'↑ Emerging':momVal<=0.35?'↓ Fading':'Stable'});
+
+  var score=maxPts>0?Math.round(pts/maxPts*100):0;
+  var grade=score>=80?'A':score>=65?'B':score>=50?'C':score>=35?'D':'N';
+  var col  =score>=80?'var(--green)':score>=65?'var(--accent)':score>=50?'var(--gold)':'var(--red)';
+
+  return {score:score,grade:grade,col:col,pts:pts,maxPts:maxPts,breakdown:breakdown,
+    consensus:consensus,obsState:obs.state};
 }
 
 function renderWatchoutsHtml(watchouts){
@@ -4307,18 +4375,81 @@ function buildCombinedScore(entries, predictions, letter){
   var regime    = entries.length>=8 ? detectRegimeShift(entries) : {shifting:false,overlapScore:1};
   var w = letter ? getWeights(letter) : Object.assign({},DEFAULT_WEIGHTS);
 
-  // If regime is shifting: boost recency and momentum, reduce freq weight
-  // This is a scoring-time adjustment — does not permanently change stored weights
+  // ── SIGNAL RELIABILITY WEIGHTING ─────────
+  // For shops with enough prediction history, blend stored weights with
+  // outcome-correlated lift weights. Signals that have proven predictive
+  // for THIS shop get their effective weight boosted; noise signals reduced.
   var effectiveW = Object.assign({},w);
-  if(regime.shifting){
-    var freqBoost  = Math.max(0, 1-regime.overlapScore); // 0 to 0.4
-    effectiveW.freq     = Math.max(WEIGHT_MIN, w.freq     * (1 - freqBoost));
-    effectiveW.recency  = Math.min(WEIGHT_MAX, w.recency  * (1 + freqBoost*0.5));
-    effectiveW.momentum = Math.min(WEIGHT_MAX, (w.momentum||DEFAULT_WEIGHTS.momentum) * (1 + freqBoost));
-    // Renormalise
-    var total = SIGNAL_KEYS.reduce(function(s,k){return s+(effectiveW[k]||0);},0);
-    if(total>0) SIGNAL_KEYS.forEach(function(k){ effectiveW[k]=(effectiveW[k]||0)/total; });
+  var resolved = (predictions||[]).filter(function(p){return p.status!=='pending'&&p.outcome;});
+
+  if(resolved.length>=5){
+    // Compute per-signal outcome correlation across all predicted codes
+    var signalLifts={};
+    var sigTotal=0;
+    SIGNAL_KEYS.forEach(function(k){
+      var liftSum=0, liftCount=0;
+      var allPredCodes=Array.from(new Set(resolved.reduce(function(a,p){return a.concat(p.predictedCodes);},[]) ));
+      allPredCodes.forEach(function(c){
+        var corr=buildSignalOutcomeCorrelation(k,c,predictions);
+        if(corr&&corr.resolved>=2){liftSum+=corr.lift;liftCount++;}
+      });
+      // Positive lift = signal predicts hits. Negative = predicts misses.
+      signalLifts[k]=liftCount>0?liftSum/liftCount:0;
+    });
+
+    // Blend: effectiveW = 0.6×storedW + 0.4×liftW (normalised)
+    // liftW is proportional to positive lift, floored at WEIGHT_MIN
+    var maxLift=Math.max.apply(null,Object.values(signalLifts).map(Math.abs).concat([0.001]));
+    var liftW={};
+    SIGNAL_KEYS.forEach(function(k){
+      var lift=signalLifts[k];
+      // Proven positive lift → boost; negative or zero → floor at minimum
+      liftW[k]=lift>0?Math.max(WEIGHT_MIN,lift/maxLift*(w[k]||DEFAULT_WEIGHTS[k])*2)
+                     :WEIGHT_MIN;
+    });
+    // Normalise liftW to sum to 1
+    var liftSum2=SIGNAL_KEYS.reduce(function(s,k){return s+liftW[k];},0);
+    if(liftSum2>0) SIGNAL_KEYS.forEach(function(k){liftW[k]=liftW[k]/liftSum2;});
+
+    // Blend stored weights (60%) with lift-based weights (40%)
+    SIGNAL_KEYS.forEach(function(k){
+      effectiveW[k]=0.60*(w[k]||DEFAULT_WEIGHTS[k]) + 0.40*liftW[k];
+    });
+    // Renormalise blend
+    var blendTotal=SIGNAL_KEYS.reduce(function(s,k){return s+(effectiveW[k]||0);},0);
+    if(blendTotal>0) SIGNAL_KEYS.forEach(function(k){effectiveW[k]=(effectiveW[k]||0)/blendTotal;});
   }
+
+  // ── REGIME SHIFT ADJUSTMENT ───────────────
+  // On top of reliability weighting: if regime is shifting, boost
+  // recency and momentum further, reduce freq
+  if(regime.shifting){
+    var freqBoost  = Math.max(0, 1-regime.overlapScore);
+    effectiveW.freq     = Math.max(WEIGHT_MIN, effectiveW.freq    * (1-freqBoost));
+    effectiveW.recency  = Math.min(WEIGHT_MAX, effectiveW.recency * (1+freqBoost*0.5));
+    effectiveW.momentum = Math.min(WEIGHT_MAX,(effectiveW.momentum||DEFAULT_WEIGHTS.momentum)*(1+freqBoost));
+    var rTotal=SIGNAL_KEYS.reduce(function(s,k){return s+(effectiveW[k]||0);},0);
+    if(rTotal>0) SIGNAL_KEYS.forEach(function(k){effectiveW[k]=(effectiveW[k]||0)/rTotal;});
+  }
+
+  // ── SHOP CONFIDENCE MODULATION ────────────
+  // Scale final scores by shop's recent hit rate.
+  // High-confidence shop → wide spread (scores mean more).
+  // Low-confidence shop → compressed toward mean (more uncertainty).
+  // shopConf ranges 0–1; modulation: score = score^(1/compressionFactor)
+  // where compressionFactor = 1 + (1-shopConf)*1.5
+  var shopConf = 0.5; // default: neutral
+  if(resolved.length>=3){
+    var hitTotal=0,hitCount=0;
+    resolved.slice(-8).forEach(function(p){
+      Object.values(p.outcome).forEach(function(v){hitTotal++;if(v==='hit')hitCount++;});
+    });
+    shopConf = hitTotal>0 ? hitCount/hitTotal : 0.5;
+  }
+  // Compression factor: at 0% hit rate → compress heavily (factor 2.5)
+  //                     at 50% hit rate → slight compress (factor 1.75)
+  //                     at 100% hit rate → no compression (factor 1.0)
+  var compressionFactor = 1.0 + (1.0-shopConf)*1.5;
 
   var all=Array.from(new Set(entries.reduce(function(a,e){return a.concat(e.codes);},[])));
 
@@ -4346,7 +4477,7 @@ function buildCombinedScore(entries, predictions, letter){
       overdue:   (overdue[c]||0),
       qtydom:    (qtydom[c]||0),
       qtystreak: (qtystreak[c]||0),
-      momentum:  (momentum[c]||0.5) // 0.5 = neutral, >0.5 = emerging, <0.5 = fading
+      momentum:  (momentum[c]||0.5)
     };
 
     var base =
@@ -4365,12 +4496,27 @@ function buildCombinedScore(entries, predictions, letter){
 
     var qt = qtrend[c]||1.0;
     var mp = missPen[c]!==undefined ? missPen[c] : 1.0;
+    var raw = base * qt * mp;
 
-    scores[c]    = base * qt * mp;
+    // Shop confidence modulation: compress scores toward mean
+    // Normalise to 0-1, apply power compression, keep relative ordering
+    scores[c]    = raw;
     snapshots[c] = sig;
   });
+
+  // Apply compression after all scores computed (needs max for normalisation)
+  if(compressionFactor > 1.0 && Object.keys(scores).length > 1){
+    var maxRaw=Math.max.apply(null,Object.values(scores).concat([0.001]));
+    Object.keys(scores).forEach(function(c){
+      var norm=scores[c]/maxRaw; // 0–1
+      var compressed=Math.pow(norm, compressionFactor); // compresses low scores less, high scores more
+      scores[c]=compressed*maxRaw; // scale back
+    });
+  }
+
   return {scores:scores, snapshots:snapshots, weights:effectiveW, regime:regime,
-          momentum:momResult.raw||{}};
+          momentum:momResult.raw||{}, shopConf:shopConf,
+          signalLifts:resolved.length>=5?signalLifts:null};
 }
 
 // ── EMERGENT PATTERN ENGINE ───────────────
@@ -4900,26 +5046,43 @@ function renderAnalytics(){
   var emergentPatterns=buildEmergentPatterns(entries,preds);
   renderEmergentCard(emergentPatterns,'emergent-content');
 
-  // ── PROCESSED: Signal Effectiveness ──
-  var w=getWeights(activeShop);
-  var resolvedCount=preds.filter(function(p){return p.status!=='pending';}).length;
-  var wEntries=SIGNAL_KEYS.map(function(k){return [k,w[k]];}).sort(function(a,b){return b[1]-a[1];});
-  var wMax=wEntries[0][1];
-  var sigLabels={freq:'Frequency',recency:'Recency',streak:'Streak',bias:'Pred. Accuracy',cooccur:'Co-occurrence',interval:'Interval',dow:'Day-of-week',cycle:'Cycle',overdue:'Overdue',qtydom:'Qty dominance',qtystreak:'Qty streak'};
-  var wHtml='<p style="font-size:11px;color:var(--muted);margin-bottom:8px;line-height:1.5">'
-    +(resolvedCount<5?'⚙️ Using defaults — adapts after '+(5-resolvedCount)+' more predictions.':'⚙️ Adapted from '+resolvedCount+' resolved predictions.')
-    +'</p>'
-    +wEntries.map(function(x){
-      var key=x[0],val=x[1],def=DEFAULT_WEIGHTS[key]||0;
-      var pct=Math.round(val*100),defPct=Math.round(def*100),diff=pct-defPct;
-      var col=val>def?'var(--green)':val<def*0.8?'var(--red)':'var(--accent)';
-      var diffStr=diff>0?'<span style="color:var(--green)">+'+diff+'%</span>':diff<0?'<span style="color:var(--red)">'+diff+'%</span>':'<span style="color:var(--muted)">—</span>';
-      return '<div class="freq-row"><span class="freq-code" style="font-size:11px;min-width:90px;font-family:var(--sans)">'+(sigLabels[key]||key)+'</span>'
-        +'<div class="freq-bar-wrap"><div class="freq-bar" style="width:'+(val/wMax*100).toFixed(0)+'%;background:'+(SIGNAL_COLORS[key]||col)+'"></div></div>'
-        +'<span class="freq-count" style="color:'+(SIGNAL_COLORS[key]||col)+';min-width:30px">'+pct+'%</span>'
-        +'<span style="font-size:10px;min-width:36px;text-align:right">'+diffStr+'</span></div>';
+  // ── PROCESSED: Signal Effectiveness (with outcome-correlated lift) ──
+  var sigEffEl=document.getElementById('signal-weights-content');
+  if(sigEffEl){
+    var bcsForSig=buildCombinedScore(entries,preds,activeShop);
+    var sigLifts=bcsForSig.signalLifts||{};
+    var wEff=bcsForSig.weights||{};
+    var hasLifts=Object.keys(sigLifts).length>0;
+    var sigHtml2='<div style="font-size:11px;color:var(--muted);margin-bottom:8px">'
+      +(hasLifts
+        ?'Effective weights blend stored weights (60%) with outcome-correlated lift (40%). Signals with negative lift are down-weighted automatically.'
+        :'Need 5+ resolved predictions to compute signal lift. Showing stored weights.')
+      +'</div>';
+
+    var sigRows=SIGNAL_KEYS.map(function(k){
+      var ew=Math.round((wEff[k]||0)*100);
+      var stored=Math.round((getWeights(activeShop)[k]||DEFAULT_WEIGHTS[k])*100);
+      var lift=hasLifts&&sigLifts[k]!==undefined?sigLifts[k]:null;
+      var liftPct=lift!==null?Math.round(lift*100):null;
+      var liftCol=liftPct===null?'var(--muted)':liftPct>=15?'var(--green)':liftPct>=-5?'var(--gold)':'var(--red)';
+      var badge=liftPct===null?'':liftPct>=15?'<span style="font-size:9px;background:rgba(62,207,142,.15);color:var(--green);padding:1px 5px;border-radius:6px">KEY</span>'
+        :liftPct>=-5?'<span style="font-size:9px;background:rgba(245,169,74,.15);color:var(--gold);padding:1px 5px;border-radius:6px">USEFUL</span>'
+        :'<span style="font-size:9px;background:rgba(107,114,128,.15);color:var(--muted);padding:1px 5px;border-radius:6px">NOISE</span>';
+      var sigCol=SIGNAL_COLORS[k]||'var(--muted)';
+      return '<div style="display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid var(--border)">'
+        +'<div style="width:8px;height:8px;border-radius:50%;background:'+sigCol+';flex-shrink:0"></div>'
+        +'<span style="font-size:11px;color:var(--muted);min-width:90px">'+(SIGNAL_NAMES[k]||k)+'</span>'
+        +'<div style="flex:1;height:5px;background:var(--surface2);border-radius:3px;overflow:hidden">'
+          +'<div style="width:'+ew+'%;height:100%;background:'+sigCol+'"></div>'
+        +'</div>'
+        +'<span style="font-size:11px;font-family:var(--mono);font-weight:700;color:'+sigCol+';min-width:28px">'+ew+'%</span>'
+        +(stored!==ew?'<span style="font-size:9px;color:var(--muted)">(stored '+stored+'%)</span>':'')
+        +(liftPct!==null?'<span style="font-size:10px;font-family:var(--mono);color:'+liftCol+';min-width:36px;text-align:right">'+(liftPct>0?'+':'')+liftPct+'%</span>':'')
+        +badge
+        +'</div>';
     }).join('');
-  document.getElementById('signal-weights-content').innerHTML=wHtml;
+    sigEffEl.innerHTML=sigHtml2+sigRows;
+  }
 
   // ── PROCESSED: Lessons Learned ──
   var resolved=preds.filter(function(p){return p.status!=='pending'&&p.outcome;});
@@ -5518,20 +5681,45 @@ function renderCodeHitProfile(code, container){
     return;
   }
 
+  // Build grade
+  var currentResult=buildCombinedScore(entries,preds,activeShop);
+  var maxS2=Math.max.apply(null,Object.values(currentResult.scores).concat([0.001]));
+  var codePct=Math.round((currentResult.scores[code]||0)/maxS2*100);
+  var snap2=currentResult.snapshots[code]||{};
+  var codeGrade=buildCodeConfidenceGrade(code,snap2,currentResult.weights,entries,preds,activeShop,codePct);
+
   var confCol={high:'var(--green)',moderate:'var(--gold)',watch:'var(--gold)',low:'var(--red)'}[profile.confLevel]||'var(--muted)';
   var confIcon={high:'🎯',moderate:'📈',watch:'👁',low:'⚠️'}[profile.confLevel]||'';
   var confLabel={high:'HIGH CONFIDENCE',moderate:'MODERATE',watch:'WATCH',low:'LOW CONFIDENCE'}[profile.confLevel]||'';
 
   var html='<div style="background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:10px;margin:4px 0 8px">';
 
-  // Header
-  html+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">'
+  // Header — code + grade + hit profile summary
+  html+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">'
     +'<span style="font-family:var(--mono);font-weight:900;font-size:18px;color:var(--accent)">'+code+'</span>'
+    +'<span style="font-size:22px;font-weight:900;font-family:var(--mono);color:'+codeGrade.col+'">['+codeGrade.grade+']</span>'
     +'<div style="flex:1">'
     +'<div style="font-size:12px;font-weight:700;color:var(--text)">Hit Profile — '+profile.hits+'/'+profile.resolved+' predictions hit ('+profile.hitRate+'%)</div>'
     +'<div style="font-size:10px;color:var(--muted)">appears in '+profile.appRate+'% of refills'+(profile.avgGap?' · avg gap '+profile.avgGap+' refills':'')+'</div>'
     +'</div>'
     +'<span style="font-size:10px;font-weight:800;padding:3px 8px;border-radius:10px;background:rgba(0,0,0,.2);color:'+confCol+'">'+confIcon+' '+confLabel+'</span>'
+    +'</div>';
+
+  // Grade breakdown — mini table showing each component
+  html+='<div style="background:rgba(0,0,0,.2);border-radius:8px;padding:8px;margin-bottom:10px">'
+    +'<div style="font-size:10px;font-weight:700;color:var(--muted);margin-bottom:5px;text-transform:uppercase;letter-spacing:.4px">Grade breakdown ['+codeGrade.grade+'] = '+codeGrade.score+'/100</div>'
+    +codeGrade.breakdown.map(function(b){
+      var pct=Math.round(b.pts/b.max*100);
+      var col=pct>=70?'var(--green)':pct>=40?'var(--gold)':'var(--red)';
+      return '<div style="display:flex;align-items:center;gap:6px;padding:2px 0">'
+        +'<span style="font-size:10px;color:var(--muted);min-width:100px">'+b.label+'</span>'
+        +'<div style="flex:1;height:4px;background:var(--surface);border-radius:2px;overflow:hidden">'
+          +'<div style="width:'+pct+'%;height:100%;background:'+col+'"></div>'
+        +'</div>'
+        +'<span style="font-size:10px;font-family:var(--mono);color:'+col+';min-width:30px;text-align:right">'+b.pts+'/'+b.max+'</span>'
+        +'<span style="font-size:9px;color:var(--muted);min-width:80px;text-align:right">'+b.detail+'</span>'
+        +'</div>';
+    }).join('')
     +'</div>';
 
   // Hit confidence meter
@@ -5739,10 +5927,14 @@ function renderDashboard(){
   var top5EvidEl=document.getElementById('top5-evidence');
   var codeStates=entries.length>=4?classifyCodeStates(entries):{};
   var regime=bcsResult.regime||{shifting:false};
+  var shopConf=bcsResult.shopConf||0.5;
 
   if(badgeEl){
     badgeEl.className='pred-confidence-badge '+verdictCls(ms.level);
-    badgeEl.textContent=verdictLabel(ms.level)+(ms.hitRate!==null?' · '+ms.hitRate+'% hit':'');
+    var confPct=Math.round(shopConf*100);
+    var modNote=shopConf<0.35?' · scores compressed':'';
+    badgeEl.textContent=verdictLabel(ms.level)+(ms.hitRate!==null?' · '+ms.hitRate+'% hit':'')+modNote;
+    badgeEl.title='Shop confidence: '+confPct+'% (last 8 preds). Scores are '+(shopConf<0.35?'compressed — low shop confidence':shopConf>=0.65?'at full spread — high shop confidence':'lightly modulated')+'.';
   }
 
   if(top5EvidEl){
@@ -5788,6 +5980,12 @@ function renderDashboard(){
           +'</span>';
       }
 
+      // Per-code confidence grade — combines consensus, threshold, bias, obs window, momentum
+      var codeGrade=buildCodeConfidenceGrade(code,snap,bcsResult.weights,entries,preds,activeShop,pct);
+      var gradeBadge='<span style="font-size:10px;font-weight:900;font-family:var(--mono);'
+        +'padding:2px 6px;border-radius:8px;'
+        +'background:rgba(0,0,0,.25);color:'+codeGrade.col+'">['+codeGrade.grade+']</span>';
+
       return '<div class="pred-code-row" style="cursor:pointer" onclick="toggleCodeProfile(\''+code+'\')">'
         +'<span class="pred-code-medal">'+medals[i]+'</span>'
         +'<span class="pred-code-val" style="color:'+(i===0?'var(--gold)':i===1?'var(--accent)':i===2?'var(--accent2)':i===3?'var(--green)':'var(--muted)')+'">'+code+'</span>'
@@ -5797,7 +5995,7 @@ function renderDashboard(){
         +'<div style="width:'+pct+'%;height:100%;background:'+sigCol+';border-radius:2px"></div></div>'
         +'</div>'
         +'<span class="pred-code-score" style="color:'+sigCol+'">'+pct+'%</span>'
-        +'<span class="pred-code-conf '+relCls+'">'+rel.level.toUpperCase()+'</span>'
+        +gradeBadge
         +'</div>'
         +'<div id="code-profile-'+code+'" style="display:none"></div>';
     }).join('');
@@ -8022,36 +8220,29 @@ function renderPredEvidenceTable(){
     var pct=Math.round(sc/maxS*100);
     var snap=snaps[c]||{};
 
-    // Find top 2 contributing signals
+    // Top driver signals
     var topSigs=SIGNAL_KEYS.map(function(k){
       return {k:k,contrib:(snap[k]||0)*(weights[k]||DEFAULT_WEIGHTS[k])};
     }).sort(function(a,b){return b.contrib-a.contrib;}).slice(0,2).filter(function(s){return s.contrib>0.005;});
-
-    // Signal reliability for top signal
     var topKey=topSigs.length?topSigs[0].k:null;
-    var rel=topKey?signalReliability(topKey,entries,preds,c):{level:'none',reason:'No data'};
-    var relCls={strong:'sb-strong',moderate:'sb-moderate',weak:'sb-weak',none:'sb-none'}[rel.level]||'sb-none';
     var sigCol=topKey?getSignalColor(topKey):'var(--muted)';
 
-    // Z-score if available
-    var corr=topKey?buildSignalOutcomeCorrelation(topKey,c,preds):null;
-    var zStr=corr&&corr.resolved>=3?'z='+(corr.lift*10).toFixed(1):'';
+    // Per-code confidence grade — full composite
+    var codeGrade=buildCodeConfidenceGrade(c,snap,weights,entries,preds,code,pct);
 
     var driverText=topSigs.map(function(s){
       return '<span style="color:'+getSignalColor(s.k)+'">'+getSignalName(s.k)+'</span>';
-    }).join(' + ')+(zStr?' <span style="color:var(--muted)">'+zStr+'</span>':'');
-
-    var confBadge='<span class="pred-code-conf '+relCls+'">'+rel.level.toUpperCase()+'</span>';
+    }).join(' + ');
 
     return '<div class="pred-code-row">'
       +'<span class="pred-code-medal">'+medals[i]+'</span>'
-      +'<span class="pred-code-val">'+c+'</span>'
-      +'<div class="pred-code-driver">'+driverText+'<br>'
+      +'<span class="pred-code-val" style="color:'+sigCol+'">'+c+'</span>'
+      +'<div class="pred-code-driver">'+driverText
       +'<div style="margin-top:2px;height:4px;background:var(--surface);border-radius:2px;overflow:hidden">'
       +'<div style="width:'+pct+'%;height:100%;background:'+sigCol+';border-radius:2px"></div></div>'
       +'</div>'
       +'<span class="pred-code-score" style="color:'+sigCol+'">'+pct+'%</span>'
-      +confBadge
+      +'<span style="font-size:11px;font-weight:900;font-family:var(--mono);color:'+codeGrade.col+'">['+codeGrade.grade+']</span>'
       +'</div>';
   }).join('');
 
