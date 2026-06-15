@@ -5827,6 +5827,8 @@ function renderDashboard(){
   document.getElementById('last-updated').textContent='Updated '+new Date().toLocaleTimeString();
   document.getElementById('ai-insight-content').innerHTML='<button class="btn btn-primary" onclick="generateAiInsight()">✨ Generate Insight</button>';
 
+  var top5CodesForCooccur=top3.map(function(x){return x[0];});
+
   // ── Refill Confidence Score ──
   var rcs=buildRefillConfidenceScore(entries,preds,top5CodesForCooccur,bcsResult,activeShop);
   var rcsEl=document.getElementById('refill-confidence-score');
@@ -5906,7 +5908,6 @@ function renderDashboard(){
   }
 
   // ── Co-occurrence implications ──
-  var top5CodesForCooccur=top3.map(function(x){return x[0];});
   renderCooccurImplications(entries, top5CodesForCooccur, 'predict-cooccur');
 
   // ── Watchouts in Predict tab ──
