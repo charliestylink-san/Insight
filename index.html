@@ -725,14 +725,6 @@ label{display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bot
         </p>
         <div id="learned-thresholds"></div>
       </div>
-      <div class="card">
-        <div class="card-title">📋 EVIDENCE LEDGER — Model decisions vs outcomes</div>
-        <p style="font-size:11px;color:var(--muted);margin-bottom:10px;line-height:1.5">
-          Every model decision — observation window changes, weight updates, emergent pattern promotions —
-          tracked against actual hit performance. Shows whether each decision was correct.
-        </p>
-        <div id="evidence-ledger"></div>
-      </div>
       <div class="section-head">⏳ PENDING — Awaiting next refill</div>
       <div id="pending-list"></div>
       <div class="section-head">⚡ TRIGGERED — Promoted & watchout codes outside top-5</div>
@@ -1427,7 +1419,9 @@ function autoSavePrediction(letter){
     targetDate:null,
     predictedCodes:top5.map(function(x){return x[0];}),
     promotedCodes:(result.promotions||[]).map(function(p){return p.promoted;}),
+    patternRules:(result.promotions||[]).map(function(p){return p.pattern&&p.pattern.rule?p.pattern.rule.slice(0,40):'pattern';}),
     watchoutCodes:(result.watchouts||[]).map(function(w){return w.code;}),
+    regimeAtTime:result.regime?{shifting:result.regime.shifting,note:result.regime.note||''}:null,
     scores:top5.reduce(function(o,x){o[x[0]]=x[1];return o;},{}),
     signalSnapshot:(function(){
       var snap={};
@@ -6787,7 +6781,6 @@ function renderTrack(){
   renderAccuracySummary(resolved);
   renderBiasChart(preds);
   renderLearnedThresholds(activeShop, 'learned-thresholds');
-  renderEvidenceLedger(activeShop, 'evidence-ledger');
   var pendEl=document.getElementById('pending-list');
   pendEl.innerHTML=pending.length
     ?pending.map(function(p){return predCardHTML(p,true);}).join('')
@@ -7114,18 +7107,6 @@ function renderTriggeredHistory(letter, containerId){
     if(resolvedWithTriggered.length){
       html+='<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:5px">Prediction-by-prediction hit check</div>';
 
-      // Column header — date + up to 6 triggered code slots + hit%
-      html+='<div style="font-size:9px;color:var(--muted);display:grid;grid-template-columns:44px repeat(6,1fr) 36px;gap:3px;padding:2px 0;border-bottom:1px solid var(--border);margin-bottom:3px">'
-        +'<span>DATE</span>'
-        +'<span style="text-align:center">T1</span>'
-        +'<span style="text-align:center">T2</span>'
-        +'<span style="text-align:center">T3</span>'
-        +'<span style="text-align:center">T4</span>'
-        +'<span style="text-align:center">T5</span>'
-        +'<span style="text-align:center">T6</span>'
-        +'<span style="text-align:right">HIT%</span>'
-        +'</div>';
-
       html+=resolvedWithTriggered.map(function(p){
         var to=p.triggeredOutcome;
         var codes=Object.keys(to);
@@ -7135,31 +7116,41 @@ function renderTriggeredHistory(letter, containerId){
         var hCol=hitPct>=60?'var(--green)':hitPct>=30?'var(--gold)':'var(--red)';
         var maxS=Math.max.apply(null,Object.values(p.scores||{}).concat([0.001]));
 
-        var cells=codes.slice(0,6).map(function(c){
+        // Each triggered code as a pill matching top-5 format:
+        // code (bold) + type icon + hit/miss icon
+        // score bar (full width)
+        // score % (prominent, right-aligned)
+        var pills=codes.map(function(c){
           var t=to[c];
           var appeared=t.appeared;
           var col=appeared?'var(--green)':'var(--red)';
           var icon=appeared?'✓':'✗';
           var typeIcon=t.type==='promoted'?'🔬':'⚠️';
-          var sc=t.scorePct!==null?t.scorePct:(p.scores&&p.scores[c]?Math.round(p.scores[c]/maxS*100):null);
-          return '<div style="display:flex;flex-direction:column;align-items:center;gap:1px">'
-            +'<span style="font-family:var(--mono);font-weight:800;font-size:10px;color:'+col+'">'+c+'</span>'
-            +'<span style="font-size:9px">'+typeIcon+' <span style="color:'+col+'">'+icon+'</span></span>'
+          var barCol=t.type==='promoted'?'var(--green)':'var(--gold)';
+          var sc=t.scorePct!==null?t.scorePct
+            :(p.scores&&p.scores[c]?Math.round(p.scores[c]/maxS*100):null);
+          return '<div style="display:flex;align-items:center;gap:5px;margin-bottom:4px">'
+            // Code + type + hit icon
+            +'<span style="font-family:var(--mono);font-weight:900;font-size:13px;min-width:24px;color:'+col+'">'+c+'</span>'
+            +'<span style="font-size:10px">'+typeIcon+'</span>'
+            +'<span style="font-size:11px;font-weight:700;color:'+col+'">'+icon+'</span>'
+            // Score bar (flex:1)
+            +'<div style="flex:1;height:5px;background:var(--surface);border-radius:3px;overflow:hidden">'
+              +(sc!==null?'<div style="width:'+sc+'%;height:100%;background:'+barCol+';border-radius:3px"></div>':'')
+            +'</div>'
+            // Score % prominent
             +(sc!==null
-              ?'<div style="width:100%;height:3px;background:var(--surface2);border-radius:2px;overflow:hidden">'
-                +'<div style="width:'+sc+'%;height:100%;background:'+(t.type==='promoted'?'rgba(62,207,142,.6)':'rgba(245,158,11,.5)')+';border-radius:2px"></div></div>'
-                +'<span style="font-size:8px;color:var(--muted)">'+sc+'%</span>'
-              :'')
+              ?'<span style="font-size:11px;font-family:var(--mono);font-weight:700;color:'+col+';min-width:32px;text-align:right">'+sc+'%</span>'
+              :'<span style="min-width:32px"></span>')
             +'</div>';
         }).join('');
 
-        // Pad to 6 slots
-        for(var pi=codes.length;pi<6;pi++) cells+='<div></div>';
-
-        return '<div style="display:grid;grid-template-columns:44px repeat(6,1fr) 36px;gap:3px;padding:5px 0;border-bottom:1px solid var(--border);align-items:center">'
-          +'<span style="font-family:var(--mono);font-size:10px;color:var(--muted)">'+dateStr+'</span>'
-          +cells
-          +'<span style="font-size:10px;font-family:var(--mono);font-weight:700;color:'+hCol+';text-align:right">'+hitPct+'%</span>'
+        return '<div style="padding:6px 0;border-bottom:1px solid var(--border)">'
+          +'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">'
+            +'<span style="font-family:var(--mono);font-size:10px;color:var(--muted)">'+dateStr+'</span>'
+            +'<span style="font-size:11px;font-family:var(--mono);font-weight:700;color:'+hCol+'">'+nHit+'/'+codes.length+' hit · '+hitPct+'%</span>'
+          +'</div>'
+          +pills
           +'</div>';
       }).join('');
 
@@ -8810,6 +8801,7 @@ function renderRecentPerf(letter, containerId){
   var el = document.getElementById(containerId);
   if(!el) return;
   db=loadDB();
+  var entries=shopEntries(letter);
   var perf = shopRecentPerf(letter, rpfWindow);
   var allPreds = shopPreds(letter);
 
@@ -8887,75 +8879,191 @@ function renderRecentPerf(letter, containerId){
     // Pad to 5 code columns
     for(var i=p.predictedCodes.length;i<5;i++) codeCells+='<div></div>';
 
-    // Surprise hits — codes that arrived but weren't predicted
+    // ── 4. REGIME FLAG — was a shift active at prediction time? ──
+    var regimeFlag='';
+    var regSnap=p.regimeAtTime||null;
+    // Fall back: re-detect from signal snapshot if stored
+    if(!regSnap&&p.signalSnapshot){
+      // We can't fully re-detect without entries, but if weightsAtTime shows
+      // elevated recency/momentum vs stored defaults that's a proxy for shift
+      var wt=p.weightsAtTime||{};
+      var recencyBoost=(wt.recency||0)-(DEFAULT_WEIGHTS.recency||0);
+      if(recencyBoost>0.04) regSnap={shifting:true,note:'Weights shifted toward recency'};
+    }
+    if(regSnap&&regSnap.shifting){
+      regimeFlag='<div style="grid-column:1/-1;padding:2px 0">'
+        +'<span style="font-size:9px;background:rgba(245,158,11,.12);color:var(--gold);'
+        +'padding:1px 6px;border-radius:6px">⚡ regime shift active at prediction time'
+        +(regSnap.note?' — '+regSnap.note:'')+'</span>'
+        +'</div>';
+    }
+
+    // ── 7. EMERGENT PATTERN TRIGGERS ──
+    var patternCell='';
+    if(p.promotedCodes&&p.promotedCodes.length&&p.patternRules&&p.patternRules.length){
+      patternCell='<div style="grid-column:1/-1;padding:2px 0">'
+        +'<span style="font-size:9px;color:var(--green)">🔬 patterns: '
+        +p.patternRules.slice(0,3).map(function(r){
+          return '<span style="opacity:.8">'+r+'</span>';
+        }).join(' · ')
+        +'</span></div>';
+    }
+
+    // Surprise hits — with threshold marker
     var surpriseCodes=Array.from(new Set((p.actualCodes||[]).filter(function(c){
       return p.predictedCodes.indexOf(c)===-1;
     })));
     var surpriseCell=surpriseCodes.length
-      ?'<div style="grid-column:1/-1;font-size:9px;color:var(--green);padding:2px 0">+ surprise: '
+      ?'<div style="grid-column:1/-1;padding:3px 0;border-top:1px solid rgba(255,255,255,.06)">'
+        +'<div style="font-size:9px;color:var(--muted);margin-bottom:2px">+ surprise</div>'
         +surpriseCodes.map(function(c){
           var sc=scores[c];
           var sPct=sc&&maxS>0?Math.round(sc/maxS*100):null;
-          return '<strong style="font-family:var(--mono);color:var(--sig-momentum)">'+c+'</strong>'
-            +(sPct!==null?'<span style="color:var(--muted)"> '+sPct+'%</span>':'');
-        }).join(' ')
+          // ── 2. THRESHOLD MARKER on surprise ──
+          var lt=db.shops[letter]&&db.shops[letter].learnedThresholds;
+          var thresh=lt&&lt.perCode&&lt.perCode[c]||null;
+          var threshMark='';
+          if(thresh&&sPct!==null){
+            var above=sPct>=thresh.thresholdPct;
+            threshMark='<span style="font-size:9px;color:'+(above?'var(--green)':'var(--gold)')+'">'
+              +(above?'▲':'▼')+thresh.thresholdPct+'%</span>';
+          }
+          var col='var(--sig-momentum)';
+          return '<div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">'
+            +'<span style="font-family:var(--mono);font-weight:900;font-size:13px;min-width:24px;color:'+col+'">'+c+'</span>'
+            +'<span style="font-size:10px">🎯</span>'
+            +threshMark
+            +'<div style="flex:1;height:5px;background:var(--surface);border-radius:3px;overflow:hidden">'
+              +(sPct!==null?'<div style="width:'+sPct+'%;height:100%;background:'+col+';border-radius:3px"></div>':'')
+            +'</div>'
+            +(sPct!==null?'<span style="font-size:11px;font-family:var(--mono);font-weight:700;color:'+col+';min-width:32px;text-align:right">'+sPct+'%</span>':'<span style="min-width:32px"></span>')
+            +'</div>';
+        }).join('')
         +'</div>'
       :'';
 
-    // Promoted codes — flagged by patterns, shown with hit/miss
+    // Promoted codes
     var promotedCodes=(p.promotedCodes||[]).filter(function(c){
-      return p.predictedCodes.indexOf(c)===-1; // only those outside top-5
+      return p.predictedCodes.indexOf(c)===-1;
     });
     var promotedCell='';
     if(promotedCodes.length&&p.actualCodes){
-      promotedCell='<div style="grid-column:1/-1;padding:3px 0;border-top:1px solid rgba(255,255,255,.06)">'
-        +'<div style="font-size:9px;color:var(--muted);margin-bottom:2px;letter-spacing:.3px">🔬 PROMOTED</div>'
-        +'<div style="display:flex;gap:6px;flex-wrap:wrap">'
+      promotedCell='<div style="grid-column:1/-1;padding:4px 0;border-top:1px solid rgba(255,255,255,.06)">'
+        +'<div style="font-size:9px;color:var(--muted);margin-bottom:3px;letter-spacing:.3px">🔬 PROMOTED</div>'
         +promotedCodes.map(function(c){
           var appeared=p.actualCodes&&p.actualCodes.indexOf(c)>-1;
           var sc=scores[c];
           var sPct=sc&&maxS>0?Math.round(sc/maxS*100):null;
           var col=appeared?'var(--green)':'var(--red)';
           var icon=appeared?'✓':'✗';
-          return '<div style="display:flex;flex-direction:column;align-items:center;gap:1px;min-width:28px">'
-            +'<span style="font-family:var(--mono);font-weight:800;font-size:11px;color:'+col+'">'+c+'</span>'
-            +'<span style="font-size:10px;color:'+col+'">'+icon+'</span>'
-            +(sPct!==null
-              ?'<div style="width:100%;height:3px;background:var(--surface2);border-radius:2px;overflow:hidden">'
-                +'<div style="width:'+sPct+'%;height:100%;background:rgba(62,207,142,.5)"></div></div>'
-                +'<span style="font-size:9px;color:var(--muted)">'+sPct+'%</span>'
-              :'')
+          return '<div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">'
+            +'<span style="font-family:var(--mono);font-weight:900;font-size:13px;min-width:24px;color:'+col+'">'+c+'</span>'
+            +'<span style="font-size:10px">🔬</span>'
+            +'<span style="font-size:11px;font-weight:700;color:'+col+'">'+icon+'</span>'
+            +'<div style="flex:1;height:5px;background:var(--surface);border-radius:3px;overflow:hidden">'
+              +(sPct!==null?'<div style="width:'+sPct+'%;height:100%;background:var(--green);border-radius:3px"></div>':'')
+            +'</div>'
+            +(sPct!==null?'<span style="font-size:11px;font-family:var(--mono);font-weight:700;color:'+col+';min-width:32px;text-align:right">'+sPct+'%</span>':'<span style="min-width:32px"></span>')
             +'</div>';
         }).join('')
-        +'</div></div>';
+        +'</div>';
     }
 
-    // Watchout codes — flagged but outside top-5, show hit/miss
+    // Watchout codes
     var watchoutCodes=(p.watchoutCodes||[]).filter(function(c){
       return p.predictedCodes.indexOf(c)===-1&&promotedCodes.indexOf(c)===-1;
     });
     var watchoutCell='';
     if(watchoutCodes.length&&p.actualCodes){
-      watchoutCell='<div style="grid-column:1/-1;padding:3px 0;border-top:1px solid rgba(255,255,255,.06)">'
-        +'<div style="font-size:9px;color:var(--muted);margin-bottom:2px;letter-spacing:.3px">⚠️ WATCHOUT</div>'
-        +'<div style="display:flex;gap:6px;flex-wrap:wrap">'
+      watchoutCell='<div style="grid-column:1/-1;padding:4px 0;border-top:1px solid rgba(255,255,255,.06)">'
+        +'<div style="font-size:9px;color:var(--muted);margin-bottom:3px;letter-spacing:.3px">⚠️ WATCHOUT</div>'
         +watchoutCodes.map(function(c){
           var appeared=p.actualCodes&&p.actualCodes.indexOf(c)>-1;
           var sc=scores[c];
           var sPct=sc&&maxS>0?Math.round(sc/maxS*100):null;
           var col=appeared?'var(--green)':'var(--muted)';
           var icon=appeared?'✓':'·';
-          return '<div style="display:flex;flex-direction:column;align-items:center;gap:1px;min-width:28px">'
-            +'<span style="font-family:var(--mono);font-weight:800;font-size:11px;color:'+col+'">'+c+'</span>'
-            +'<span style="font-size:10px;color:'+col+'">'+icon+'</span>'
-            +(sPct!==null
-              ?'<div style="width:100%;height:3px;background:var(--surface2);border-radius:2px;overflow:hidden">'
-                +'<div style="width:'+sPct+'%;height:100%;background:rgba(245,158,11,.4)"></div></div>'
-                +'<span style="font-size:9px;color:var(--muted)">'+sPct+'%</span>'
-              :'')
+          return '<div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">'
+            +'<span style="font-family:var(--mono);font-weight:900;font-size:13px;min-width:24px;color:'+col+'">'+c+'</span>'
+            +'<span style="font-size:10px">⚠️</span>'
+            +'<span style="font-size:11px;font-weight:700;color:'+col+'">'+icon+'</span>'
+            +'<div style="flex:1;height:5px;background:var(--surface);border-radius:3px;overflow:hidden">'
+              +(sPct!==null?'<div style="width:'+sPct+'%;height:100%;background:var(--gold);border-radius:3px"></div>':'')
+            +'</div>'
+            +(sPct!==null?'<span style="font-size:11px;font-family:var(--mono);font-weight:700;color:'+col+';min-width:32px;text-align:right">'+sPct+'%</span>':'<span style="min-width:32px"></span>')
             +'</div>';
         }).join('')
-        +'</div></div>';
+        +'</div>';
+    }
+
+    // ── 1. CYCLE DUE codes (outside top-5, proven) ──
+    var cycleCell='';
+    if(entries.length>=6&&p.actualCodes){
+      // Re-build cycle map from entries up to this prediction's date
+      var trainUpto=entries.filter(function(e){return e.date<=(p.createdDate||p.actualDate||'');});
+      if(trainUpto.length>=4){
+        var cycleMap=buildCycleScore(trainUpto);
+        var lastEntry2=trainUpto[trainUpto.length-1];
+        var cycleDue=Object.keys(cycleMap).filter(function(c){
+          return (cycleMap[c]||0)>=0.35
+            &&p.predictedCodes.indexOf(c)===-1
+            &&promotedCodes.indexOf(c)===-1
+            &&watchoutCodes.indexOf(c)===-1
+            &&(!lastEntry2||lastEntry2.codes.indexOf(c)===-1); // absent last refill
+        }).slice(0,4);
+        if(cycleDue.length){
+          cycleCell='<div style="grid-column:1/-1;padding:4px 0;border-top:1px solid rgba(255,255,255,.06)">'
+            +'<div style="font-size:9px;color:var(--muted);margin-bottom:3px;letter-spacing:.3px">🔄 CYCLE DUE</div>'
+            +cycleDue.map(function(c){
+              var appeared=p.actualCodes&&p.actualCodes.indexOf(c)>-1;
+              var col=appeared?'var(--sig-cycle)':'var(--muted)';
+              var icon=appeared?'✓':'·';
+              var sc=scores[c];
+              var sPct=sc&&maxS>0?Math.round(sc/maxS*100):null;
+              var cStr=Math.round((cycleMap[c]||0)*100)+'%';
+              return '<div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">'
+                +'<span style="font-family:var(--mono);font-weight:900;font-size:13px;min-width:24px;color:'+col+'">'+c+'</span>'
+                +'<span style="font-size:10px">🔄</span>'
+                +'<span style="font-size:11px;font-weight:700;color:'+col+'">'+icon+'</span>'
+                +'<span style="font-size:9px;color:var(--muted);min-width:36px">cy:'+cStr+'</span>'
+                +'<div style="flex:1;height:5px;background:var(--surface);border-radius:3px;overflow:hidden">'
+                  +(sPct!==null?'<div style="width:'+sPct+'%;height:100%;background:var(--sig-cycle);border-radius:3px"></div>':'')
+                +'</div>'
+                +(sPct!==null?'<span style="font-size:11px;font-family:var(--mono);font-weight:700;color:'+col+';min-width:32px;text-align:right">'+sPct+'%</span>':'<span style="min-width:32px"></span>')
+                +'</div>';
+            }).join('')
+            +'</div>';
+        }
+      }
+    }
+
+    // Co-occurrence tight pairs
+    var tightPairsCell='';
+    if(p.predictedCodes&&entries.length>=4){
+      var implications=buildCooccurImplications(entries,p.predictedCodes);
+      var tightImps=implications.filter(function(x){return x.tight;});
+      if(tightImps.length){
+        tightPairsCell='<div style="grid-column:1/-1;padding:4px 0;border-top:1px solid rgba(255,255,255,.06)">'
+          +'<div style="font-size:9px;color:var(--muted);margin-bottom:3px;letter-spacing:.3px">🔗 TIGHT PAIRS</div>'
+          +tightImps.slice(0,4).map(function(imp){
+            var appeared=p.actualCodes&&p.actualCodes.indexOf(imp.impliedCode)>-1;
+            var col=appeared?'var(--sig-cooccur)':'var(--muted)';
+            var icon=appeared?'✓':'·';
+            var sc=scores[imp.impliedCode];
+            var sPct=sc&&maxS>0?Math.round(sc/maxS*100):null;
+            return '<div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">'
+              +'<span style="font-family:var(--mono);font-weight:900;font-size:13px;min-width:24px;color:'+col+'">'+imp.impliedCode+'</span>'
+              +'<span style="font-size:10px">🔗</span>'
+              +'<span style="font-size:11px;font-weight:700;color:'+col+'">'+icon+'</span>'
+              +'<span style="font-size:9px;color:var(--muted);min-width:50px">via '+imp.via+' ('+imp.rate+'%)</span>'
+              +'<div style="flex:1;height:5px;background:var(--surface);border-radius:3px;overflow:hidden">'
+                +(sPct!==null?'<div style="width:'+sPct+'%;height:100%;background:var(--sig-cooccur);border-radius:3px"></div>':'')
+              +'</div>'
+              +(sPct!==null?'<span style="font-size:11px;font-family:var(--mono);font-weight:700;color:'+col+';min-width:32px;text-align:right">'+sPct+'%</span>':'<span style="min-width:32px"></span>')
+              +'</div>';
+          }).join('')
+          +'</div>';
+      }
     }
 
     return '<div style="display:grid;grid-template-columns:44px repeat(5,1fr) 36px;'
@@ -8965,9 +9073,13 @@ function renderRecentPerf(letter, containerId){
       +(slotPct!==null
         ?'<span style="font-size:10px;font-family:var(--mono);font-weight:700;color:'+slotCol+';text-align:right">'+slotPct+'%</span>'
         :'<span></span>')
+      +regimeFlag
+      +patternCell
       +surpriseCell
       +promotedCell
       +watchoutCell
+      +cycleCell
+      +tightPairsCell
       +'</div>';
   }).join('');
 
@@ -10159,9 +10271,13 @@ function rebuildPredictions(){
         var patterns=buildEmergentPatterns(trainEntries,currentPreds);
         var appliedResult=applyEmergentToTop3(top5.slice(),patterns,result.scores);
         pred.promotedCodes=(appliedResult.promotions||[]).map(function(p){return p.promoted;});
+        pred.patternRules=(appliedResult.promotions||[]).map(function(p){
+          return p.pattern&&p.pattern.rule?p.pattern.rule.slice(0,40):'pattern';
+        });
 
         var watchoutsAtTime=buildWatchouts(trainEntries,currentPreds,result,top5Codes,letter);
         pred.watchoutCodes=watchoutsAtTime.map(function(w){return w.code;});
+        pred.regimeAtTime=result.regime?{shifting:result.regime.shifting,note:result.regime.note||''}:null;
 
         // Compute triggeredOutcome — did promoted/watchout codes actually arrive?
         var allTriggered=Array.from(new Set(
