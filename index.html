@@ -6817,72 +6817,142 @@ function predCardHTML(pred, canResolve){
   var sLabels={pending:'⏳',hit:'✅',partial:'⚡',miss:'❌'};
   var sColors={pending:'var(--muted)',hit:'var(--green)',partial:'var(--gold)',miss:'var(--red)'};
   var scores=pred.scores||{};
-  var maxScore=pred.predictedCodes.reduce(function(m,c){return Math.max(m,scores[c]||0);},0.001);
+  var maxScore=Math.max.apply(null,
+    Object.values(scores).concat([0.001])
+  );
+  var lt=activeShop&&db.shops[activeShop]&&db.shops[activeShop].learnedThresholds||null;
 
-  // Compact code pills: code + hit/miss icon + score bar
-  var codePills=pred.predictedCodes.map(function(c,i){
+  // ── Build unified code list ──────────────
+  // Collect all codes across all types, deduped
+  var allCodes=[];
+  var seen=new Set();
+
+  function addCode(c, type){
+    if(seen.has(c)) return;
+    seen.add(c);
+    allCodes.push({c:c,type:type});
+  }
+
+  pred.predictedCodes.forEach(function(c){ addCode(c,'top5'); });
+  (pred.promotedCodes||[]).filter(function(c){
+    return pred.predictedCodes.indexOf(c)===-1;
+  }).forEach(function(c){ addCode(c,'promoted'); });
+  (pred.watchoutCodes||[]).filter(function(c){
+    return pred.predictedCodes.indexOf(c)===-1;
+  }).forEach(function(c){ addCode(c,'watchout'); });
+  // Surprise — arrived but not in any of the above
+  if(pred.actualCodes&&pred.outcome){
+    Array.from(new Set(pred.actualCodes)).filter(function(c){
+      return !seen.has(c);
+    }).forEach(function(c){ addCode(c,'surprise'); });
+  }
+  // Triggered outcome codes not captured above
+  if(pred.triggeredOutcome){
+    Object.keys(pred.triggeredOutcome).forEach(function(c){
+      if(!seen.has(c)) addCode(c, pred.triggeredOutcome[c].type||'watchout');
+    });
+  }
+
+  // Type metadata
+  var typeMeta={
+    top5:    {icon:'',        barCol:null,       labelCol:null},
+    promoted:{icon:'🔬',     barCol:'var(--green)',  labelCol:'var(--green)'},
+    watchout:{icon:'⚠️',     barCol:'var(--gold)',   labelCol:'var(--gold)'},
+    surprise:{icon:'🎯',     barCol:'var(--sig-momentum)', labelCol:'var(--sig-momentum)'},
+  };
+
+  // ── Render each code pill ──────────────
+  var codePills=allCodes.map(function(entry){
+    var c=entry.c, type=entry.type;
+    var meta=typeMeta[type]||typeMeta.watchout;
+
+    // Outcome
     var outcome=pred.outcome?pred.outcome[c]:null;
-    var icon=outcome==='hit'?'✓':outcome==='miss'?'✗':outcome==='partial'?'~':'';
-    var col=outcome==='hit'?'var(--green)':outcome==='miss'?'var(--red)':outcome==='partial'?'var(--gold)':'var(--muted)';
+    // For non-top5, check triggeredOutcome
+    if(!outcome&&pred.triggeredOutcome&&pred.triggeredOutcome[c]){
+      outcome=pred.triggeredOutcome[c].appeared?'hit':'miss';
+    }
+    // For surprises that aren't in outcome map, check actualCodes
+    if(!outcome&&pred.actualCodes){
+      outcome=pred.actualCodes.indexOf(c)>-1?'hit':'miss';
+    }
+
+    var isHit=outcome==='hit', isMiss=outcome==='miss', isPart=outcome==='partial';
+    var isPending=!outcome;
+
+    var outcomeCol=isHit?'var(--green)':isPart?'var(--gold)':isMiss?'var(--red)':'var(--muted)';
+    var icon=isHit?'✓':isPart?'~':isMiss?'✗':isPending?'':'·';
+
     var scorePct=maxScore>0?Math.round((scores[c]||0)/maxScore*100):0;
-    // Check if this code was promoted by a pattern
-    var promoted=pred.promotedCodes&&pred.promotedCodes.indexOf(c)>-1;
-    return '<div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">'
-      +'<span style="font-family:var(--mono);font-weight:800;font-size:13px;min-width:26px;color:'+(outcome?col:'var(--accent)')+'">'+c+'</span>'
-      +(promoted?'<span style="font-size:9px;color:var(--green);flex-shrink:0">🔬</span>':'')
-      +(icon?'<span style="font-size:11px;color:'+col+'">'+icon+'</span>':'')
-      +'<div style="flex:1;height:5px;background:var(--surface);border-radius:3px;overflow:hidden">'
-      +'<div style="width:'+scorePct+'%;height:100%;background:'+col+';border-radius:3px"></div></div>'
-      +'<span style="font-size:10px;font-family:var(--mono);color:var(--muted);min-width:28px;text-align:right">'+scorePct+'%</span>'
+    var barCol=meta.barCol||(isHit?'var(--green)':isPart?'var(--gold)':'var(--red)');
+    var codeCol=isPending?(meta.labelCol||'var(--accent)'):outcomeCol;
+
+    // Threshold marker (for non-top5 types — contextualises the score)
+    var threshMark='';
+    if(type!=='top5'&&lt&&lt.perCode&&lt.perCode[c]){
+      var t=lt.perCode[c];
+      var aboveT=scorePct>=t.thresholdPct;
+      threshMark='<span style="font-size:8px;color:'+(aboveT?'var(--green)':'var(--gold)')+'">'
+        +(aboveT?'▲':'▼')+t.thresholdPct+'%</span>';
+    }
+
+    // Divider before first non-top5 code
+    var divider='';
+    if(type!=='top5'&&allCodes.indexOf(entry)>0&&allCodes[allCodes.indexOf(entry)-1].type==='top5'){
+      divider='<div style="border-top:1px solid var(--border);margin:3px 0"></div>';
+    }
+
+    return divider
+      +'<div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">'
+        // Type icon (empty for top5)
+        +(meta.icon?'<span style="font-size:10px;flex-shrink:0;min-width:16px">'+meta.icon+'</span>':'<span style="min-width:16px"></span>')
+        // Code
+        +'<span style="font-family:var(--mono);font-weight:900;font-size:13px;min-width:26px;color:'+codeCol+'">'+c+'</span>'
+        // Hit/miss icon
+        +(icon?'<span style="font-size:11px;font-weight:700;color:'+outcomeCol+'">'+icon+'</span>':'<span style="min-width:12px"></span>')
+        // Threshold marker for non-top5
+        +threshMark
+        // Score bar
+        +'<div style="flex:1;height:5px;background:var(--surface);border-radius:3px;overflow:hidden">'
+          +'<div style="width:'+scorePct+'%;height:100%;background:'+barCol+';border-radius:3px"></div>'
+        +'</div>'
+        // Score %
+        +'<span style="font-size:11px;font-family:var(--mono);font-weight:700;color:'+outcomeCol+';min-width:32px;text-align:right">'+scorePct+'%</span>'
       +'</div>';
   }).join('');
 
-  // Summary: hit rate + slot coverage on one line
+  // ── Summary line ──
   var summaryLine='';
   if(pred.outcome){
-    var hits=Object.values(pred.outcome).filter(function(v){return v==='hit';}).length;
-    var hitRate=Math.round(hits/pred.predictedCodes.length*100);
+    var top5Codes=pred.predictedCodes;
+    var top5Hits=top5Codes.filter(function(c){return pred.outcome[c]==='hit';}).length;
+    var top5Rate=Math.round(top5Hits/top5Codes.length*100);
     var slotPct=pred.totalSlots>0?Math.round((pred.slotsCovered||0)/pred.totalSlots*100):null;
-    var hCol=hitRate===100?'var(--green)':hitRate>=40?'var(--gold)':'var(--red)';
-    summaryLine='<div style="font-size:11px;color:var(--muted);margin-top:4px;display:flex;gap:12px">'
-      +'<span>Hit rate: <strong style="color:'+hCol+'">'+hitRate+'%</strong></span>'
-      +(slotPct!==null?'<span>Slot coverage: <strong style="color:'+hCol+'">'+slotPct+'%</strong></span>':'')
+    var hCol=top5Rate===100?'var(--green)':top5Rate>=40?'var(--gold)':'var(--red)';
+
+    // Triggered hit rate
+    var triggTotal=0,triggHit=0;
+    if(pred.triggeredOutcome){
+      Object.values(pred.triggeredOutcome).forEach(function(t){triggTotal++;if(t.appeared)triggHit++;});
+    }
+    var triggRateStr=triggTotal>0?' · triggered: <strong style="color:'+(triggHit/triggTotal>=0.5?'var(--green)':'var(--gold)')+'">'+Math.round(triggHit/triggTotal*100)+'%</strong> ('+triggTotal+')':'';
+
+    summaryLine='<div style="font-size:11px;color:var(--muted);margin-top:4px;display:flex;gap:12px;flex-wrap:wrap">'
+      +'<span>top-5: <strong style="color:'+hCol+'">'+top5Rate+'%</strong></span>'
+      +(slotPct!==null?'<span>slots: <strong style="color:'+hCol+'">'+slotPct+'%</strong></span>':'')
+      +triggRateStr
       +'</div>';
   }
 
-  // Surprise hits — codes that arrived but weren't predicted
-  var actualRow='';
-  if(pred.actualCodes&&pred.actualCodes.length&&pred.outcome){
-    var uniqueActual=Array.from(new Set(pred.actualCodes));
-    var surprises=uniqueActual.filter(function(c){return pred.predictedCodes.indexOf(c)===-1;});
-    if(surprises.length){
-      // Show surprise codes with their scores if available
-      actualRow='<div style="font-size:10px;margin-top:5px;padding:4px 6px;background:rgba(62,207,142,.06);border-radius:6px;border-left:2px solid rgba(62,207,142,.3)">'
-        +'<span style="color:var(--green);font-weight:700">+ Surprise: </span>'
-        +surprises.map(function(c){
-          var sc=scores[c];
-          var sPct=sc&&maxScore>0?Math.round(sc/maxScore*100):null;
-          return '<span style="font-family:var(--mono);font-weight:700;color:var(--sig-momentum)">'+c+'</span>'
-            +(sPct!==null?'<span style="font-size:9px;color:var(--muted)"> '+sPct+'%</span>':'');
-        }).join(' ')
-        +'</div>';
-    }
+  // ── Regime / pattern context ──
+  var contextLine='';
+  if(pred.regimeAtTime&&pred.regimeAtTime.shifting){
+    contextLine+='<div style="font-size:9px;margin-top:3px">'
+      +'<span style="background:rgba(245,158,11,.12);color:var(--gold);padding:1px 6px;border-radius:6px">⚡ regime shift'+(pred.regimeAtTime.note?' — '+pred.regimeAtTime.note:'')+'</span>'
+      +'</div>';
   }
-
-  // Triggered watchouts that hit — codes not in top-5 but flagged and arrived
-  var watchoutRow='';
-  if(pred.watchoutCodes&&pred.actualCodes){
-    var watchoutHits=pred.watchoutCodes.filter(function(c){
-      return pred.actualCodes&&pred.actualCodes.indexOf(c)>-1;
-    });
-    if(watchoutHits.length){
-      watchoutRow='<div style="font-size:10px;margin-top:4px;padding:4px 6px;background:rgba(245,158,11,.06);border-radius:6px;border-left:2px solid rgba(245,158,11,.3)">'
-        +'<span style="color:var(--gold);font-weight:700">⚠️ Watchout hit: </span>'
-        +watchoutHits.map(function(c){
-          return '<span style="font-family:var(--mono);font-weight:700;color:var(--gold)">'+c+'</span>';
-        }).join(' ')
-        +'</div>';
-    }
+  if(pred.patternRules&&pred.patternRules.length){
+    contextLine+='<div style="font-size:9px;color:var(--green);margin-top:2px">🔬 '+pred.patternRules.slice(0,2).join(' · ')+'</div>';
   }
 
   var statusCol=sColors[pred.status]||'var(--muted)';
@@ -6892,13 +6962,14 @@ function predCardHTML(pred, canResolve){
 
   return '<div style="padding:10px 0;border-bottom:1px solid var(--border)">'
     +'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">'
-    +'<span style="font-size:11px;color:var(--muted);font-family:var(--mono)">'+(pred.actualDate||pred.createdDate)+'</span>'
-    +'<span style="font-size:12px;font-weight:700;color:'+statusCol+'">'+sLabels[pred.status]+' '+(pred.status==='hit'?'All hit':pred.status==='partial'?'Partial':pred.status==='miss'?'Miss':'Pending')+'</span>'
+      +'<span style="font-size:11px;color:var(--muted);font-family:var(--mono)">'+(pred.actualDate||pred.createdDate)+'</span>'
+      +'<span style="font-size:12px;font-weight:700;color:'+statusCol+'">'+sLabels[pred.status]+' '
+        +(pred.status==='hit'?'All hit':pred.status==='partial'?'Partial':pred.status==='miss'?'Miss':'Pending')
+      +'</span>'
     +'</div>'
     +codePills
     +summaryLine
-    +actualRow
-    +watchoutRow
+    +contextLine
     +(canResolve?'<div style="margin-top:6px">'+btns+'</div>':'')
     +'</div>';
 }
@@ -7361,10 +7432,9 @@ function renderAccuracySummary(resolved){
     +'</div>';
 
   // Per-prediction history table — newest first
-  var tableHeader='<div style="display:grid;grid-template-columns:90px 1fr 60px 60px;gap:4px;padding:5px 0;border-bottom:1px solid var(--border)">'
+  var tableHeader='<div style="display:grid;grid-template-columns:76px 1fr 44px;gap:4px;padding:5px 0;border-bottom:1px solid var(--border)">'
     +'<span style="font-size:10px;font-weight:700;color:var(--muted);letter-spacing:.5px">DATE</span>'
     +'<span style="font-size:10px;font-weight:700;color:var(--muted);letter-spacing:.5px">PREDICTED → ACTUAL</span>'
-    +'<span style="font-size:10px;font-weight:700;color:var(--muted);letter-spacing:.5px;text-align:center">SCORES</span>'
     +'<span style="font-size:10px;font-weight:700;color:var(--muted);letter-spacing:.5px;text-align:right">HIT%</span>'
     +'</div>';
 
@@ -7376,28 +7446,92 @@ function renderAccuracySummary(resolved){
     var scores=p.scores||{};
     var maxS=p.predictedCodes.reduce(function(m,c){return Math.max(m,scores[c]||0);},0.001);
 
-    // Predicted codes with score % and hit/miss
-    var codeStr=p.predictedCodes.map(function(c){
+    // Predicted codes — one per line: code score% hit/miss
+    var codeLines=p.predictedCodes.map(function(c){
       var isHit=p.outcome[c]==='hit';
       var sp=Math.round((scores[c]||0)/maxS*100);
-      return '<span style="font-family:var(--mono);font-size:11px;font-weight:700;color:'+(isHit?'var(--green)':'var(--red)')+'">'+c+'</span>'
-        +'<span style="font-size:9px;color:var(--muted)">'+sp+'%</span>';
-    }).join('<span style="color:var(--border);margin:0 2px">·</span>');
+      var col=isHit?'var(--green)':'var(--red)';
+      var icon=isHit?'✓':'✗';
+      // Check promoted
+      var isPromoted=p.promotedCodes&&p.promotedCodes.indexOf(c)>-1;
+      return '<div style="display:flex;align-items:center;gap:4px;margin-bottom:1px">'
+        +'<span style="font-family:var(--mono);font-size:11px;font-weight:700;color:'+col+';min-width:22px">'+c+'</span>'
+        +(isPromoted?'<span style="font-size:9px;color:var(--green)">🔬</span>':'')
+        +'<span style="font-size:10px;color:'+col+'">'+icon+'</span>'
+        +'<div style="flex:1;height:3px;background:var(--surface2);border-radius:2px;overflow:hidden">'
+          +'<div style="width:'+sp+'%;height:100%;background:'+col+'"></div>'
+        +'</div>'
+        +'<span style="font-size:10px;font-family:var(--mono);color:'+col+';min-width:28px;text-align:right">'+sp+'%</span>'
+        +'</div>';
+    }).join('');
 
-    // Actual codes (surprise codes in muted)
+    // Actual codes that arrived (surprises highlighted)
     var actualUniq=Array.from(new Set(p.actualCodes||[]));
-    var actualStr=actualUniq.map(function(c){
-      var wasPred=p.predictedCodes.indexOf(c)>-1;
-      return '<span style="font-family:var(--mono);font-size:11px;color:'+(wasPred?'var(--green)':'var(--muted)')+'">'+c+'</span>';
-    }).join(' ');
+    var actualStr=actualUniq.length
+      ?'<div style="margin-top:3px;font-size:10px;color:var(--muted)">→ '
+        +actualUniq.map(function(c){
+          var wasPred=p.predictedCodes.indexOf(c)>-1;
+          return '<span style="font-family:var(--mono);font-weight:700;color:'+(wasPred?'var(--green)':'var(--sig-momentum)')+'">'+c+'</span>';
+        }).join(' ')
+        +'</div>'
+      :'';
 
-    return '<div style="display:grid;grid-template-columns:90px 1fr 60px 60px;gap:4px;padding:6px 0;border-bottom:1px solid var(--border);align-items:start">'
-      +'<span style="font-family:var(--mono);font-size:11px;color:var(--muted)">'+(p.actualDate||p.createdDate)+'</span>'
-      +'<div><div style="margin-bottom:2px">'+codeStr+'</div>'
-      +(actualStr?'<div>→ '+actualStr+'</div>':'')
-      +'</div>'
-      +'<span></span>'
-      +'<span style="font-family:var(--mono);font-weight:800;font-size:13px;color:'+rc+';text-align:right">'+hitRate+'%</span>'
+    // Triggered codes below (promoted/watchout/surprise not in top-5)
+    var triggLines='';
+    if(pred&&(pred.triggeredOutcome||pred.promotedCodes||pred.watchoutCodes)){
+      // Build triggered code list from all sources
+      var triggCodes={};
+      // From triggeredOutcome (most accurate — has appeared + type + scorePct)
+      if(p.triggeredOutcome){
+        Object.keys(p.triggeredOutcome).forEach(function(c){
+          if(p.predictedCodes.indexOf(c)===-1) triggCodes[c]=p.triggeredOutcome[c];
+        });
+      }
+      // From promotedCodes/watchoutCodes (fallback for older predictions)
+      (p.promotedCodes||[]).forEach(function(c){
+        if(p.predictedCodes.indexOf(c)===-1&&!triggCodes[c]){
+          triggCodes[c]={type:'promoted',appeared:p.actualCodes&&p.actualCodes.indexOf(c)>-1,scorePct:null};
+        }
+      });
+      (p.watchoutCodes||[]).forEach(function(c){
+        if(p.predictedCodes.indexOf(c)===-1&&!triggCodes[c]){
+          triggCodes[c]={type:'watchout',appeared:p.actualCodes&&p.actualCodes.indexOf(c)>-1,scorePct:null};
+        }
+      });
+      // Use full scores map for maxS so non-top5 codes are included
+      var fullMaxS=Math.max.apply(null,Object.values(scores).concat([0.001]));
+      if(Object.keys(triggCodes).length){
+        triggLines='<div style="border-top:1px solid rgba(255,255,255,.08);margin-top:4px;padding-top:4px">';
+        Object.keys(triggCodes).forEach(function(c){
+          var t=triggCodes[c];
+          var typeIcon=t.type==='promoted'?'🔬':'⚠️';
+          var col=t.appeared?'var(--green)':'var(--muted)';
+          var icon=t.appeared?'✓':'·';
+          // Robust score: use stored scorePct first, then compute from scores map
+          var sp=t.scorePct!==null&&t.scorePct!==undefined
+            ?t.scorePct
+            :(scores[c]?Math.round(scores[c]/fullMaxS*100):null);
+          var barCol=t.type==='promoted'?'var(--green)':'var(--gold)';
+          triggLines+='<div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">'
+            +'<span style="font-size:10px;flex-shrink:0;min-width:18px">'+typeIcon+'</span>'
+            +'<span style="font-family:var(--mono);font-size:12px;font-weight:900;color:'+col+';min-width:24px">'+c+'</span>'
+            +'<span style="font-size:11px;font-weight:700;color:'+col+'">'+icon+'</span>'
+            +'<div style="flex:1;height:4px;background:var(--surface2);border-radius:2px;overflow:hidden">'
+              +(sp!==null?'<div style="width:'+sp+'%;height:100%;background:'+barCol+'"></div>':'')
+            +'</div>'
+            +(sp!==null
+              ?'<span style="font-size:12px;font-family:var(--mono);font-weight:800;color:'+col+';min-width:36px;text-align:right">'+sp+'%</span>'
+              :'<span style="min-width:36px;font-size:10px;color:var(--muted);text-align:right">—</span>')
+            +'</div>';
+        });
+        triggLines+='</div>';
+      }
+    }
+
+    return '<div style="display:grid;grid-template-columns:76px 1fr 44px;gap:4px;padding:6px 0;border-bottom:1px solid var(--border);align-items:start">'
+      +'<span style="font-family:var(--mono);font-size:10px;color:var(--muted);padding-top:2px">'+(p.actualDate||p.createdDate)+'</span>'
+      +'<div>'+codeLines+actualStr+triggLines+'</div>'
+      +'<span style="font-family:var(--mono);font-weight:800;font-size:14px;color:'+rc+';text-align:right;padding-top:2px">'+hitRate+'%</span>'
       +'</div>';
   }).join('');
 
