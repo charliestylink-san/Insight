@@ -7478,7 +7478,7 @@ function renderAccuracySummary(resolved){
 
     // Triggered codes below (promoted/watchout/surprise not in top-5)
     var triggLines='';
-    if(pred&&(pred.triggeredOutcome||pred.promotedCodes||pred.watchoutCodes)){
+    if(p&&(p.triggeredOutcome||p.promotedCodes||p.watchoutCodes)){
       // Build triggered code list from all sources
       var triggCodes={};
       // From triggeredOutcome (most accurate — has appeared + type + scorePct)
