@@ -623,6 +623,8 @@ label{display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bot
         <div id="top5-evidence"></div>
         <!-- Promotion explanation — shown when any code is promoted -->
         <div id="promotion-note" style="display:none;font-size:10px;color:var(--muted);margin-top:6px;padding:5px 8px;background:var(--surface);border-radius:6px;border-left:2px solid var(--green)"></div>
+        <!-- InsightPro agreement badge -->
+        <div id="pro-agreement-badge" style="display:none;margin-top:6px"></div>
         <div id="pred-saved-indicator" style="font-size:11px;color:var(--green);margin-top:8px;display:none">
           ✅ Top-5 prediction saved — will be compared against the next refill automatically
         </div>
@@ -733,13 +735,10 @@ label{display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bot
       </div>
       <div class="section-head">⏳ PENDING — Awaiting next refill</div>
       <div id="pending-list"></div>
+      <div class="section-head">⚡ TRIGGERED — Promoted & watchout codes outside top-5</div>
+      <div id="triggered-history"></div>
       <div class="section-head">✅ RESOLVED — Prediction history</div>
       <div id="resolved-list"></div>
-      <div class="section-head">⚡ TRIGGERED — Promoted & watchout codes outside top-5</div>
-      <p style="font-size:11px;color:var(--muted);padding:0 0 8px;line-height:1.5">
-        Codes flagged by patterns, watchouts, or promotions that weren't in the top-5. Tracks whether they actually arrived.
-      </p>
-      <div id="triggered-history"></div>
     </div>
   </div>
 
@@ -775,6 +774,11 @@ label{display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bot
         <span style="font-size:12px;color:var(--muted)">predictions</span>
       </div>
       <div id="recent-perf-content"></div>
+    </div>
+
+    <div class="card" style="margin-top:8px">
+      <div class="card-title">⚖️ VS INSIGHTPRO — Background comparison</div>
+      <div id="insight-vs-pro"></div>
     </div>
 
     <div class="card" style="margin-top:8px">
@@ -6565,9 +6569,36 @@ function renderDashboard(){
     if(fullRankEl) fullRankEl.innerHTML=(fullRankEl.innerHTML||'')+retireNote;
   }
 
+  // ── InsightPro agreement badge ──
+  var proDB2=readProDB();
+  var proBadgeEl=document.getElementById('pro-agreement-badge');
+  if(proBadgeEl&&proDB2&&proDB2.shops&&proDB2.shops[activeShop]){
+    var proSh2=proDB2.shops[activeShop];
+    var proPend2=(proSh2.predictions||[]).filter(function(p){return p.status==='pending';});
+    var proTop52=proPend2.length?proPend2[0].predictedCodes:(proSh2.models&&proSh2.models.top5||[]);
+    if(proTop52.length){
+      var iTop52=top3.map(function(x){return x[0];});
+      var agree2=iTop52.filter(function(c){return proTop52.indexOf(c)>-1;}).length;
+      var proOnly2=proTop52.filter(function(c){return iTop52.indexOf(c)===-1;});
+      var agreeCol2=agree2>=4?'var(--green)':agree2>=3?'var(--gold)':'var(--red)';
+      proBadgeEl.style.display='block';
+      proBadgeEl.innerHTML='<div style="display:flex;align-items:center;gap:8px;font-size:11px;padding:6px 8px;'
+        +'background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.2);border-radius:8px">'
+        +'<span style="color:var(--gold);font-weight:700">⚖️ InsightPro</span>'
+        +'agrees on <strong style="color:'+agreeCol2+'">'+agree2+'/5</strong>'
+        +(proOnly2.length?' · Pro prefers: <span style="font-family:var(--mono);color:var(--gold)">'+proOnly2.join(' ')+'</span>':'')
+        +'<span style="font-size:10px;color:var(--muted);margin-left:auto">'
+          +(proSh2.models&&proSh2.models.walkForward?proSh2.models.walkForward.avgSlotCov+'% walk-fwd':'run Pro Rebuild')
+        +'</span></div>';
+    } else {
+      proBadgeEl.style.display='none';
+    }
+  } else if(proBadgeEl){
+    proBadgeEl.style.display='none';
+  }
+
   // ── Promotion note ──
-  var promoNoteEl=document.getElementById('promotion-note');
-  if(promoNoteEl){
+  var promoNoteEl=document.getElementById('promotion-note');  if(promoNoteEl){
     if(promotions.length){
       promoNoteEl.style.display='block';
       promoNoteEl.innerHTML='🔬 <strong>Promotion ≠ Score:</strong> '
@@ -6757,8 +6788,11 @@ function renderTrack(){
   renderBiasChart(preds);
   renderLearnedThresholds(activeShop, 'learned-thresholds');
   renderEvidenceLedger(activeShop, 'evidence-ledger');
-  renderTriggeredHistory(activeShop, 'triggered-history');
   var pendEl=document.getElementById('pending-list');
+  pendEl.innerHTML=pending.length
+    ?pending.map(function(p){return predCardHTML(p,true);}).join('')
+    :'<p style="color:var(--muted);font-size:12px;padding:6px 0">No pending predictions.</p>';
+  renderTriggeredHistory(activeShop,'triggered-history');
   pendEl.innerHTML=pending.length
     ?pending.map(function(p){return predCardHTML(p,true);}).join('')
     :'<p style="color:var(--muted);font-size:12px;padding:6px 0">No pending predictions.</p>';
@@ -7072,13 +7106,73 @@ function renderTriggeredHistory(letter, containerId){
     var overallRate=totalAll>0?Math.round(hitAll/totalAll*100):null;
     var overallCol=overallRate>=50?'var(--green)':overallRate>=25?'var(--gold)':'var(--red)';
 
-    // Overall summary bar
+    // ── Per-prediction hit check rows (matching Prediction history format) ──
+    var resolvedWithTriggered=preds.filter(function(p){
+      return p.status!=='pending'&&p.triggeredOutcome&&Object.keys(p.triggeredOutcome).length;
+    }).slice().reverse().slice(0,10);
+
+    if(resolvedWithTriggered.length){
+      html+='<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:5px">Prediction-by-prediction hit check</div>';
+
+      // Column header — date + up to 6 triggered code slots + hit%
+      html+='<div style="font-size:9px;color:var(--muted);display:grid;grid-template-columns:44px repeat(6,1fr) 36px;gap:3px;padding:2px 0;border-bottom:1px solid var(--border);margin-bottom:3px">'
+        +'<span>DATE</span>'
+        +'<span style="text-align:center">T1</span>'
+        +'<span style="text-align:center">T2</span>'
+        +'<span style="text-align:center">T3</span>'
+        +'<span style="text-align:center">T4</span>'
+        +'<span style="text-align:center">T5</span>'
+        +'<span style="text-align:center">T6</span>'
+        +'<span style="text-align:right">HIT%</span>'
+        +'</div>';
+
+      html+=resolvedWithTriggered.map(function(p){
+        var to=p.triggeredOutcome;
+        var codes=Object.keys(to);
+        var dateStr=(p.actualDate||p.createdDate).slice(5);
+        var nHit=codes.filter(function(c){return to[c].appeared;}).length;
+        var hitPct=codes.length>0?Math.round(nHit/codes.length*100):0;
+        var hCol=hitPct>=60?'var(--green)':hitPct>=30?'var(--gold)':'var(--red)';
+        var maxS=Math.max.apply(null,Object.values(p.scores||{}).concat([0.001]));
+
+        var cells=codes.slice(0,6).map(function(c){
+          var t=to[c];
+          var appeared=t.appeared;
+          var col=appeared?'var(--green)':'var(--red)';
+          var icon=appeared?'✓':'✗';
+          var typeIcon=t.type==='promoted'?'🔬':'⚠️';
+          var sc=t.scorePct!==null?t.scorePct:(p.scores&&p.scores[c]?Math.round(p.scores[c]/maxS*100):null);
+          return '<div style="display:flex;flex-direction:column;align-items:center;gap:1px">'
+            +'<span style="font-family:var(--mono);font-weight:800;font-size:10px;color:'+col+'">'+c+'</span>'
+            +'<span style="font-size:9px">'+typeIcon+' <span style="color:'+col+'">'+icon+'</span></span>'
+            +(sc!==null
+              ?'<div style="width:100%;height:3px;background:var(--surface2);border-radius:2px;overflow:hidden">'
+                +'<div style="width:'+sc+'%;height:100%;background:'+(t.type==='promoted'?'rgba(62,207,142,.6)':'rgba(245,158,11,.5)')+';border-radius:2px"></div></div>'
+                +'<span style="font-size:8px;color:var(--muted)">'+sc+'%</span>'
+              :'')
+            +'</div>';
+        }).join('');
+
+        // Pad to 6 slots
+        for(var pi=codes.length;pi<6;pi++) cells+='<div></div>';
+
+        return '<div style="display:grid;grid-template-columns:44px repeat(6,1fr) 36px;gap:3px;padding:5px 0;border-bottom:1px solid var(--border);align-items:center">'
+          +'<span style="font-family:var(--mono);font-size:10px;color:var(--muted)">'+dateStr+'</span>'
+          +cells
+          +'<span style="font-size:10px;font-family:var(--mono);font-weight:700;color:'+hCol+';text-align:right">'+hitPct+'%</span>'
+          +'</div>';
+      }).join('');
+
+      html+='<div style="font-size:9px;color:var(--muted);margin-top:4px;margin-bottom:12px">🔬 promoted · ⚠️ watchout · bar = score at prediction time · ✓/✗ = arrived/missed</div>';
+    }
+
+    // ── Aggregate summary ──
     html+='<div style="background:var(--surface2);border-radius:10px;padding:10px;margin-bottom:10px">'
-      +'<div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.4px">HIT CHECK — Performance vs baseline</div>'
+      +'<div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.4px">Aggregate hit rates</div>'
       +'<div style="display:flex;gap:14px;margin-bottom:8px">'
         +'<div style="flex:1;text-align:center">'
           +'<div style="font-size:22px;font-weight:900;font-family:var(--mono);color:'+overallCol+'">'+( overallRate!==null?overallRate+'%':'—')+'</div>'
-          +'<div style="font-size:10px;color:var(--muted)">overall ('+totalAll+' triggered)</div>'
+          +'<div style="font-size:10px;color:var(--muted)">overall ('+totalAll+')</div>'
         +'</div>'
         +'<div style="flex:1;text-align:center">'
           +'<div style="font-size:18px;font-weight:900;font-family:var(--mono);color:var(--green)">'+( promoRate!==null?promoRate+'%':'—')+'</div>'
@@ -7089,36 +7183,30 @@ function renderTriggeredHistory(letter, containerId){
           +'<div style="font-size:10px;color:var(--muted)">⚠️ watchout ('+pt.watchout.total+')</div>'
         +'</div>'
       +'</div>'
-      // Baseline comparison
       +(function(){
         var baseline=Math.round(shopBaselineHitRate(letter)*100);
         var lift=overallRate!==null?overallRate-baseline:null;
         var liftCol=lift===null?'var(--muted)':lift>=10?'var(--green)':lift>=0?'var(--gold)':'var(--red)';
-        return '<div style="font-size:11px;color:var(--muted)">Shop baseline hit rate: <strong>'+baseline+'%</strong>'
-          +(lift!==null?' · Triggered lift: <strong style="color:'+liftCol+'">'+(lift>0?'+':'')+lift+'%</strong>':'')
-          +'</div>';
+        return '<div style="font-size:11px;color:var(--muted)">Shop baseline: <strong>'+baseline+'%</strong>'
+          +(lift!==null?' · Triggered lift: <strong style="color:'+liftCol+'">'+(lift>0?'+':'')+lift+'%</strong>':'')+'</div>';
       })()
-      // Score band calibration — does higher score = higher hit rate?
       +(function(){
         var bands=Object.keys(perf.byScoreBand).map(Number).sort(function(a,b){return a-b;});
         if(bands.length<2) return '';
-        var barMaxH=40;
-        var barsHtml='<div style="display:flex;align-items:flex-end;gap:2px;height:'+barMaxH+'px;margin-top:8px;margin-bottom:3px">';
+        var barsHtml='<div style="display:flex;align-items:flex-end;gap:2px;height:40px;margin-top:8px;margin-bottom:3px">';
         bands.forEach(function(b){
           var bd=perf.byScoreBand[b];
           var rate=bd.total>0?Math.round(bd.hit/bd.total*100):0;
-          var h=Math.max(3,Math.round(rate*barMaxH/100));
+          var h=Math.max(3,Math.round(rate*38/100));
           var col=rate>=60?'var(--green)':rate>=30?'var(--gold)':'var(--red)';
           barsHtml+='<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:1px">'
-            +'<div style="font-size:9px;color:'+col+';height:12px;line-height:12px">'+rate+'%</div>'
+            +'<div style="font-size:9px;color:'+col+';height:11px;line-height:11px">'+rate+'%</div>'
             +'<div style="width:100%;height:'+h+'px;background:'+col+';border-radius:2px 2px 0 0;min-width:10px"></div>'
             +'</div>';
         });
-        barsHtml+='</div>';
-        barsHtml+='<div style="display:flex;gap:2px">';
+        barsHtml+='</div><div style="display:flex;gap:2px">';
         bands.forEach(function(b){barsHtml+='<div style="flex:1;font-size:8px;color:var(--muted);text-align:center">'+b+'%</div>';});
-        barsHtml+='</div>';
-        barsHtml+='<div style="font-size:9px;color:var(--muted);margin-top:3px">Score band → actual hit rate. Higher score should → higher hit rate (confirms score is meaningful).</div>';
+        barsHtml+='</div><div style="font-size:9px;color:var(--muted);margin-top:3px">Score band → hit rate (higher score should = higher hit rate)</div>';
         return barsHtml;
       })()
       +'</div>';
@@ -8641,40 +8729,53 @@ function renderEvidenceLedger(letter, containerId){
     return;
   }
 
-  // Filter to PROVEN only — the signal is reliable enough to surface
+  // Filter to PROVEN/JUSTIFIED only — the signal is reliable enough to surface
   var proven=ledger.filter(function(e){
     return e.verdict==='proven'||e.verdict==='justified';
   });
 
-  // Sort by hit rate improvement (after.rate - before.rate) descending
-  proven.sort(function(a,b){
-    var liftA=(a.after.rate-a.before.rate);
-    var liftB=(b.after.rate-b.before.rate);
-    return liftB-liftA;
+  // Also include any with positive lift (after.rate > before.rate) even if not yet "proven"
+  var positive=ledger.filter(function(e){
+    return e.verdict!=='proven'&&e.verdict!=='justified'
+      &&(e.after.rate-e.before.rate)>=0;
   });
 
-  // Show count of non-proven entries
-  var nonProven=ledger.length-proven.length;
+  // Combine: proven first, then positive-lift others
+  var display=proven.concat(positive);
+
+  // Sort by hit rate improvement (after.rate - before.rate) descending
+  display.sort(function(a,b){
+    // Proven/justified first
+    var aProven=(a.verdict==='proven'||a.verdict==='justified')?1:0;
+    var bProven=(b.verdict==='proven'||b.verdict==='justified')?1:0;
+    if(bProven!==aProven) return bProven-aProven;
+    return (b.after.rate-b.before.rate)-(a.after.rate-a.before.rate);
+  });
+
+  // Show count breakdown
+  var nonProven=ledger.length-display.length;
   var header='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">'
     +'<div style="font-size:11px;color:var(--muted)">'
-    +(proven.length?proven.length+' proven decision'+(proven.length>1?'s':''):'No proven decisions yet')
+    +(display.length?display.length+' decision'+(display.length>1?'s':'')+' with +lift':'No positive-lift decisions yet')
     +'</div>'
-    +(nonProven?'<div style="font-size:10px;color:var(--muted)">'+nonProven+' pending/monitoring</div>':'')
+    +(nonProven?'<div style="font-size:10px;color:var(--muted)">'+nonProven+' negative/flat hidden</div>':'')
     +'</div>';
 
-  if(!proven.length){
-    el.innerHTML=header+'<p style="font-size:12px;color:var(--muted)">No decisions proven yet. Evidence builds as more predictions resolve. '
-      +(nonProven?nonProven+' decision'+(nonProven>1?'s are':' is')+' currently being monitored.':'')
-      +'</p>';
+  if(!display.length){
+    el.innerHTML=header+'<p style="font-size:12px;color:var(--muted)">No decisions with positive lift yet. Evidence builds as more predictions resolve.</p>';
     return;
   }
 
-  var verdictLabels={proven:'✅ PROVEN',justified:'✅ JUSTIFIED'};
+  var verdictLabels={proven:'✅ PROVEN',justified:'✅ JUSTIFIED',improving:'📈 IMPROVING',
+    monitor:'👁 MONITOR',neutral:'➡️ NEUTRAL',inconclusive:'❓ INCONCLUSIVE',
+    pending:'⏳ PENDING'};
 
-  el.innerHTML=header+proven.map(function(e){
-    var vLabel=verdictLabels[e.verdict]||'✅';
+  el.innerHTML=header+display.map(function(e){
+    var vLabel=verdictLabels[e.verdict]||e.verdict.toUpperCase();
     var lift=e.after.rate-e.before.rate;
     var liftStr=lift>0?'<span style="color:var(--green)">+'+lift+'%</span>':'<span style="color:var(--muted)">'+lift+'%</span>';
+    var vCol=(e.verdict==='proven'||e.verdict==='justified')?'rgba(62,207,142,.15)':'rgba(232,169,74,.15)';
+    var vTxt=(e.verdict==='proven'||e.verdict==='justified')?'var(--green)':'var(--gold)';
     return '<div style="padding:10px 0;border-bottom:1px solid var(--border)">'
       +'<div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:6px">'
         +'<span style="font-size:16px;flex-shrink:0">'+e.icon+'</span>'
@@ -8682,7 +8783,7 @@ function renderEvidenceLedger(letter, containerId){
           +'<div style="font-size:12px;font-weight:700;color:var(--text)">'+e.title+'</div>'
           +'<div style="font-size:10px;color:var(--muted);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+e.subtitle+'</div>'
         +'</div>'
-        +'<span style="font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px;white-space:nowrap;background:rgba(62,207,142,.15);color:var(--green);flex-shrink:0">'+vLabel+'</span>'
+        +'<span style="font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px;white-space:nowrap;background:'+vCol+';color:'+vTxt+';flex-shrink:0">'+vLabel+'</span>'
       +'</div>'
       +'<div style="display:grid;grid-template-columns:1fr 1fr 48px;gap:8px;margin-bottom:5px;align-items:center">'
         +['before','after'].map(function(side){
@@ -9032,7 +9133,162 @@ function renderConfidence(){
   renderPredEvidenceTable();
   renderRecentPerf(activeShop,'recent-perf-content');
   if(spotlightShop) renderShopSpotlight(spotlightShop);
+  renderInsightVsPro();
   renderConfidenceList();
+}
+
+// ── INSIGHT vs INSIGHTPRO COMPARISON ─────────
+// Reads InsightPro's stored data from insight_pro_v1 (same iPhone storage)
+// and compares prediction performance side by side.
+function readProDB(){
+  try{ var d=JSON.parse(localStorage.getItem('insight_pro_v1')); return d&&d.shops?d:null; }
+  catch(e){ return null; }
+}
+
+function renderInsightVsPro(){
+  var el=document.getElementById('insight-vs-pro');
+  if(!el) return;
+
+  var proDB=readProDB();
+  if(!proDB){
+    el.innerHTML='<p style="font-size:12px;color:var(--muted)">InsightPro not connected. Import your Insight backup into InsightPro and run Rebuild to enable comparison.</p>';
+    return;
+  }
+
+  db=loadDB();
+  var shops=Object.keys(db.shops).filter(function(c){return db.shops[c]&&(db.shops[c].entries||[]).length>=3;});
+  if(!shops.length){
+    el.innerHTML='<p style="font-size:12px;color:var(--muted)">No shops with enough data.</p>';
+    return;
+  }
+
+  var html='';
+
+  shops.forEach(function(code){
+    var proShop=proDB.shops&&proDB.shops[code];
+    if(!proShop) return;
+    var proModels=proShop.models;
+
+    // ── Accuracy comparison ──
+    var iPreds=shopPreds(code);
+    var iResolved=iPreds.filter(function(p){return p.status!=='pending'&&p.outcome&&p.totalSlots>0;});
+    var iSlotCov=iResolved.length?Math.round(iResolved.reduce(function(a,p){return a+(p.slotsCovered||0);},0)/iResolved.reduce(function(a,p){return a+(p.totalSlots||0);},0)*100):null;
+    var iHitT=0,iHitH=0;
+    iResolved.forEach(function(p){Object.values(p.outcome).forEach(function(v){iHitT++;if(v==='hit')iHitH++;});});
+    var iHitRate=iHitT>0?Math.round(iHitH/iHitT*100):null;
+
+    var pWF=proModels&&proModels.walkForward;
+    var pSlotCov=pWF?pWF.avgSlotCov:null;
+    var pKF=proModels&&proModels.kFold;
+
+    // ── Top-5 prediction comparison ──
+    var iPending=iPreds.filter(function(p){return p.status==='pending';});
+    var iTop5=iPending.length?iPending[0].predictedCodes:[];
+    var pPreds=proShop.predictions||[];
+    var pPending=pPreds.filter(function(p){return p.status==='pending';});
+    var pTop5=pPending.length?pPending[0].predictedCodes:proModels&&proModels.top5||[];
+    var pCalib=proModels&&proModels.calibProbs||{};
+
+    var agree=iTop5.filter(function(c){return pTop5.indexOf(c)>-1;}).length;
+    var iOnly=iTop5.filter(function(c){return pTop5.indexOf(c)===-1;});
+    var pOnly=pTop5.filter(function(c){return iTop5.indexOf(c)===-1;});
+
+    // ── Signal weight comparison ──
+    var iWeights=getWeights(code);
+    var pImp=proModels&&proModels.permImportance&&proModels.permImportance.importance||{};
+    var maxImp=Math.max.apply(null,Object.values(pImp).concat([0.001]));
+    var maxIW=Math.max.apply(null,Object.values(iWeights).concat([0.001]));
+
+    html+='<div style="border-bottom:1px solid var(--border);padding-bottom:12px;margin-bottom:12px">';
+
+    // Shop header
+    html+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">'
+      +'<span style="font-family:var(--mono);font-weight:900;font-size:16px;color:var(--accent)">'+code+'</span>'
+      +(db.shops[code].name?'<span style="font-size:11px;color:var(--muted)">'+db.shops[code].name+'</span>':'')
+      +(proModels?'<span style="font-size:10px;color:var(--green);margin-left:auto">InsightPro: rebuilt '+( proModels.builtAt?proModels.builtAt.slice(0,10):'?')+'</span>':'<span style="font-size:10px;color:var(--gold);margin-left:auto">InsightPro: not rebuilt</span>')
+    +'</div>';
+
+    // Accuracy numbers
+    html+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">'
+      // Insight
+      +'<div style="background:rgba(79,142,247,.08);border:1px solid rgba(79,142,247,.2);border-radius:8px;padding:8px;text-align:center">'
+        +'<div style="font-size:10px;font-weight:700;color:var(--accent);margin-bottom:4px">INSIGHT</div>'
+        +'<div style="font-size:22px;font-weight:900;font-family:var(--mono);color:'+( iHitRate>=60?'var(--green)':iHitRate>=30?'var(--gold)':'var(--red)')+'">'+( iHitRate!==null?iHitRate+'%':'—')+'</div>'
+        +'<div style="font-size:10px;color:var(--muted)">code hit rate</div>'
+        +'<div style="font-size:10px;color:var(--muted)">'+( iSlotCov!==null?iSlotCov+'% slot cov':'')+'</div>'
+        +'<div style="font-size:10px;color:var(--muted)">'+iResolved.length+' predictions</div>'
+      +'</div>'
+      // InsightPro
+      +'<div style="background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.2);border-radius:8px;padding:8px;text-align:center">'
+        +'<div style="font-size:10px;font-weight:700;color:var(--gold);margin-bottom:4px">INSIGHTPRO</div>'
+        +(pSlotCov!==null
+          ?'<div style="font-size:22px;font-weight:900;font-family:var(--mono);color:'+(pSlotCov>=50?'var(--green)':pSlotCov>=30?'var(--gold)':'var(--red)')+'">'+pSlotCov+'%</div>'
+            +'<div style="font-size:10px;color:var(--muted)">walk-forward slot cov</div>'
+            +(pKF?'<div style="font-size:10px;color:var(--muted)">k-fold: '+pKF.avgSlotCov+'±'+pKF.stdSlotCov+'%</div>':'')
+          :'<div style="font-size:18px;font-weight:900;color:var(--muted)">—</div><div style="font-size:10px;color:var(--muted)">run Rebuild</div>')
+      +'</div>'
+    +'</div>';
+
+    if(iTop5.length&&pTop5.length){
+      // Top-5 side by side
+      html+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin-bottom:5px;text-transform:uppercase;letter-spacing:.4px">Current top-5 comparison</div>';
+      html+='<div style="display:grid;grid-template-columns:1fr 24px 1fr;gap:4px;font-size:9px;color:var(--muted);padding:2px 0;border-bottom:1px solid var(--border);margin-bottom:3px">'
+        +'<span>INSIGHT</span><span></span><span style="text-align:right">INSIGHTPRO</span></div>';
+      var medals=['🥇','🥈','🥉','4️⃣','5️⃣'];
+      for(var i=0;i<5;i++){
+        var ic=iTop5[i]||'—',pc=pTop5[i]||'—';
+        var match=ic===pc&&ic!=='—';
+        var pProb=pc!=='—'&&pCalib[pc]?Math.round(pCalib[pc]*100)+'%':'';
+        html+='<div style="display:grid;grid-template-columns:1fr 24px 1fr;gap:4px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.05);align-items:center">'
+          +'<span style="font-family:var(--mono);font-weight:800;font-size:13px;color:var(--accent)">'+ic+'</span>'
+          +'<span style="text-align:center;color:'+(match?'var(--green)':'var(--muted)')+'">'+( match?'✓':medals[i])+'</span>'
+          +'<div style="text-align:right"><span style="font-family:var(--mono);font-weight:800;font-size:13px;color:var(--gold)">'+pc+'</span>'
+            +(pProb?'<span style="font-size:9px;color:var(--muted)"> '+pProb+'</span>':'')+'</div>'
+          +'</div>';
+      }
+      html+='<div style="font-size:11px;color:var(--muted);margin-top:6px">'
+        +'Agreement: <strong style="color:'+(agree>=4?'var(--green)':agree>=3?'var(--gold)':'var(--muted)')+'">'+agree+'/5</strong>';
+      if(iOnly.length) html+=' · Insight only: <span style="font-family:var(--mono);color:var(--accent)">'+iOnly.join(' ')+'</span>';
+      if(pOnly.length) html+=' · Pro only: <span style="font-family:var(--mono);color:var(--gold)">'+pOnly.join(' ')+'</span>';
+      html+='</div>';
+    }
+
+    // Signal weight comparison — compact bar chart
+    if(Object.keys(pImp).length){
+      html+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:8px 0 4px;text-transform:uppercase;letter-spacing:.4px">Signal: Insight weight vs Pro importance</div>';
+      html+=SIGNAL_KEYS.map(function(k){
+        var iW=Math.round((iWeights[k]||DEFAULT_WEIGHTS[k])*100);
+        var pI=Math.round((pImp[k]||0)*100);
+        var iBar=Math.round(iW/Math.round(maxIW*100)*100);
+        var pBar=pI>0?Math.round(pI/Math.round(maxImp*100)*100):0;
+        var col=SIGNAL_COLORS[k]||'var(--muted)';
+        var disagree=Math.abs(iW-pI)>=10; // notable disagreement
+        return '<div style="display:flex;align-items:center;gap:5px;padding:2px 0">'
+          +'<div style="width:7px;height:7px;border-radius:50%;background:'+col+';flex-shrink:0"></div>'
+          +'<span style="font-size:10px;color:var(--muted);min-width:68px">'+(SIGNAL_NAMES[k]||k)+'</span>'
+          +'<div style="flex:1">'
+            +'<div style="height:3px;background:var(--surface2);border-radius:2px;overflow:hidden;margin-bottom:1px">'
+              +'<div style="width:'+iBar+'%;height:100%;background:var(--accent);opacity:.8"></div>'
+            +'</div>'
+            +'<div style="height:3px;background:var(--surface2);border-radius:2px;overflow:hidden">'
+              +'<div style="width:'+pBar+'%;height:100%;background:var(--gold);opacity:.7"></div>'
+            +'</div>'
+          +'</div>'
+          +'<div style="font-size:9px;font-family:var(--mono);min-width:70px;text-align:right;color:'+(disagree?'var(--gold)':'var(--muted)')+'">I:'+iW+'% P:'+pI+'%'+(disagree?' ↕':'')+'</div>'
+          +'</div>';
+      }).join('');
+      html+='<div style="font-size:9px;color:var(--muted);margin-top:4px">Blue = Insight weight · Amber = InsightPro permutation importance · ↕ = notable disagreement</div>';
+    }
+
+    html+='</div>';
+  });
+
+  if(!html){
+    el.innerHTML='<p style="font-size:12px;color:var(--muted)">No matching shops found in InsightPro. Import the same backup into InsightPro and run Rebuild.</p>';
+    return;
+  }
+
+  el.innerHTML=html;
 }
 
 function renderConfidenceList(){
@@ -9895,6 +10151,38 @@ function rebuildPredictions(){
         actualCodes:Array.from(new Set(nextEntry.codes)).filter(function(c){return outcome[c]==='hit';}),
         auto:true
       };
+
+      // ── Retroactively compute promoted and watchout codes ──
+      // Recompute what patterns and watchouts would have been at prediction time
+      try{
+        var top5Codes=top5.map(function(x){return x[0];});
+        var patterns=buildEmergentPatterns(trainEntries,currentPreds);
+        var appliedResult=applyEmergentToTop3(top5.slice(),patterns,result.scores);
+        pred.promotedCodes=(appliedResult.promotions||[]).map(function(p){return p.promoted;});
+
+        var watchoutsAtTime=buildWatchouts(trainEntries,currentPreds,result,top5Codes,letter);
+        pred.watchoutCodes=watchoutsAtTime.map(function(w){return w.code;});
+
+        // Compute triggeredOutcome — did promoted/watchout codes actually arrive?
+        var allTriggered=Array.from(new Set(
+          pred.promotedCodes.concat(pred.watchoutCodes)
+            .filter(function(c){return top5Codes.indexOf(c)===-1;})
+        ));
+        var maxS=Math.max.apply(null,Object.values(pred.scores).concat([0.001]));
+        var triggeredOutcome={};
+        allTriggered.forEach(function(c){
+          triggeredOutcome[c]={
+            appeared:nextEntry.codes.indexOf(c)>-1,
+            type:pred.promotedCodes.indexOf(c)>-1?'promoted':'watchout',
+            scorePct:pred.scores[c]?Math.round(pred.scores[c]/maxS*100):null
+          };
+        });
+        pred.triggeredOutcome=triggeredOutcome;
+      }catch(e){
+        pred.promotedCodes=[];
+        pred.watchoutCodes=[];
+        pred.triggeredOutcome={};
+      }
 
       db.shops[letter].predictions.push(pred);
       // Save after each push so updateWeights can loadDB() safely
