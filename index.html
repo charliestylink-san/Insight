@@ -621,6 +621,8 @@ label{display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bot
         <!-- Plain English summary -->
         <div id="plain-english-summary" style="font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:10px;padding:8px;background:var(--surface);border-radius:8px;display:none"></div>
         <div id="top5-evidence"></div>
+        <!-- Promotion explanation — shown when any code is promoted -->
+        <div id="promotion-note" style="display:none;font-size:10px;color:var(--muted);margin-top:6px;padding:5px 8px;background:var(--surface);border-radius:6px;border-left:2px solid var(--green)"></div>
         <div id="pred-saved-indicator" style="font-size:11px;color:var(--green);margin-top:8px;display:none">
           ✅ Top-5 prediction saved — will be compared against the next refill automatically
         </div>
@@ -1472,6 +1474,25 @@ function autoResolve(letter, actualDate, actualCodes){
     pred.outcome=outcome;
     pred.actualDate=actualDate;
     pred.actualCodes=actualCodes;
+
+    // ── TRIGGERED OUTCOME TRACKING ──
+    // Resolve promoted and watchout codes independently of top-5
+    var triggeredOutcome={};
+    var allTriggered=Array.from(new Set(
+      (pred.promotedCodes||[]).concat(pred.watchoutCodes||[])
+        .filter(function(c){return pred.predictedCodes.indexOf(c)===-1;}) // outside top-5 only
+    ));
+    allTriggered.forEach(function(c){
+      var appeared=actualCodes.indexOf(c)>-1;
+      triggeredOutcome[c]={
+        appeared:appeared,
+        type:(pred.promotedCodes&&pred.promotedCodes.indexOf(c)>-1)?'promoted':'watchout',
+        scorePct:pred.scores&&Math.max.apply(null,Object.values(pred.scores).concat([0.001]))>0
+          ?Math.round((pred.scores[c]||0)/Math.max.apply(null,Object.values(pred.scores).concat([0.001]))*100)
+          :null
+      };
+    });
+    pred.triggeredOutcome=triggeredOutcome;
 
     // ── DIAGNOSIS: for each missed/partial code ──
     var missedCodes=pred.predictedCodes.filter(function(c){return outcome[c]==='miss';});
@@ -6544,6 +6565,24 @@ function renderDashboard(){
     if(fullRankEl) fullRankEl.innerHTML=(fullRankEl.innerHTML||'')+retireNote;
   }
 
+  // ── Promotion note ──
+  var promoNoteEl=document.getElementById('promotion-note');
+  if(promoNoteEl){
+    if(promotions.length){
+      promoNoteEl.style.display='block';
+      promoNoteEl.innerHTML='🔬 <strong>Promotion ≠ Score:</strong> '
+        +promotions.map(function(p){
+          var rule=p.pattern&&p.pattern.rule?p.pattern.rule:'emergent pattern';
+          var conf=p.pattern&&p.pattern.confidence?Math.round(p.pattern.confidence*100)+'%':'';
+          return '<strong>'+p.promoted+'</strong> promoted (displaced <strong>'+p.displaced+'</strong>) — '
+            +rule.slice(0,50)+(rule.length>50?'…':'')+( conf?' ('+conf+')':'');
+        }).join(' · ')
+        +'. Codes not implied by a triggered pattern stay in their score-ranked position.';
+    } else {
+      promoNoteEl.style.display='none';
+    }
+  }
+
   // ── Score thresholds ──
   renderThresholds(entries, preds, top5CodesForCooccur, bcsResult, 'predict-thresholds');
 
@@ -6948,135 +6987,263 @@ function renderLearnedThresholds(letter, containerId){
   el.innerHTML=html;
 }
 
+// ── TRIGGERED PERFORMANCE ANALYSIS ──────────
+// Aggregates hit/miss data for promoted and watchout codes
+// across all resolved predictions. Returns per-code and per-type stats.
+function buildTriggeredPerformance(letter){
+  var preds=shopPreds(letter);
+  var resolved=preds.filter(function(p){
+    return p.status!=='pending'&&p.triggeredOutcome&&Object.keys(p.triggeredOutcome).length;
+  });
+
+  var perCode={};   // {code: {promoted:{hit,total}, watchout:{hit,total}, scorePcts:[]}}
+  var perType={promoted:{hit:0,total:0},watchout:{hit:0,total:0}};
+  var byScoreBand={}; // {band: {hit,total}} for calibration
+
+  resolved.forEach(function(p){
+    Object.keys(p.triggeredOutcome).forEach(function(c){
+      var t=p.triggeredOutcome[c];
+      if(!perCode[c]) perCode[c]={code:c,promoted:{hit:0,total:0},watchout:{hit:0,total:0},scorePcts:[],dates:[]};
+      perCode[c][t.type].total++;
+      if(t.appeared) perCode[c][t.type].hit++;
+      if(t.scorePct!==null) perCode[c].scorePcts.push({pct:t.scorePct,appeared:t.appeared});
+      perCode[c].dates.push({date:p.actualDate||p.createdDate,appeared:t.appeared,type:t.type,scorePct:t.scorePct});
+      perType[t.type].total++;
+      if(t.appeared) perType[t.type].hit++;
+      // Score band
+      if(t.scorePct!==null){
+        var band=Math.floor(t.scorePct/20)*20; // 0,20,40,60,80
+        if(!byScoreBand[band]) byScoreBand[band]={hit:0,total:0};
+        byScoreBand[band].total++;
+        if(t.appeared) byScoreBand[band].hit++;
+      }
+    });
+  });
+
+  // Compute derived stats per code
+  Object.keys(perCode).forEach(function(c){
+    var pc=perCode[c];
+    var totalAll=pc.promoted.total+pc.watchout.total;
+    var hitAll=pc.promoted.hit+pc.watchout.hit;
+    pc.hitRate=totalAll>0?Math.round(hitAll/totalAll*100):null;
+    pc.total=totalAll;
+    pc.hit=hitAll;
+    pc.promotedRate=pc.promoted.total>0?Math.round(pc.promoted.hit/pc.promoted.total*100):null;
+    pc.watchoutRate=pc.watchout.total>0?Math.round(pc.watchout.hit/pc.watchout.total*100):null;
+    // Average score when it appeared vs didn't
+    var appPcts=pc.scorePcts.filter(function(x){return x.appeared;}).map(function(x){return x.pct;});
+    var missPcts=pc.scorePcts.filter(function(x){return !x.appeared;}).map(function(x){return x.pct;});
+    pc.avgScoreOnHit=appPcts.length?Math.round(appPcts.reduce(function(a,b){return a+b;},0)/appPcts.length):null;
+    pc.avgScoreOnMiss=missPcts.length?Math.round(missPcts.reduce(function(a,b){return a+b;},0)/missPcts.length):null;
+  });
+
+  // Sort by hit rate desc then total desc
+  var sorted=Object.values(perCode).sort(function(a,b){
+    if(b.hitRate!==a.hitRate) return (b.hitRate||0)-(a.hitRate||0);
+    return b.total-a.total;
+  });
+
+  return {
+    perCode:sorted,
+    perType:perType,
+    byScoreBand:byScoreBand,
+    resolvedCount:resolved.length
+  };
+}
+
 function renderTriggeredHistory(letter, containerId){
   var el=document.getElementById(containerId);
   if(!el) return;
   db=loadDB();
   var preds=shopPreds(letter);
 
-  // Collect all resolved predictions that had promoted or watchout codes
-  var resolved=preds.filter(function(p){
-    return p.status!=='pending' && p.outcome && p.actualCodes &&
+  // ── Performance summary from triggeredOutcome ──
+  var perf=buildTriggeredPerformance(letter);
+  var hasPerf=perf.resolvedCount>0;
+
+  var html='';
+
+  if(hasPerf){
+    var pt=perf.perType;
+    var promoRate=pt.promoted.total>0?Math.round(pt.promoted.hit/pt.promoted.total*100):null;
+    var watchRate=pt.watchout.total>0?Math.round(pt.watchout.hit/pt.watchout.total*100):null;
+    var totalAll=pt.promoted.total+pt.watchout.total;
+    var hitAll=pt.promoted.hit+pt.watchout.hit;
+    var overallRate=totalAll>0?Math.round(hitAll/totalAll*100):null;
+    var overallCol=overallRate>=50?'var(--green)':overallRate>=25?'var(--gold)':'var(--red)';
+
+    // Overall summary bar
+    html+='<div style="background:var(--surface2);border-radius:10px;padding:10px;margin-bottom:10px">'
+      +'<div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.4px">HIT CHECK — Performance vs baseline</div>'
+      +'<div style="display:flex;gap:14px;margin-bottom:8px">'
+        +'<div style="flex:1;text-align:center">'
+          +'<div style="font-size:22px;font-weight:900;font-family:var(--mono);color:'+overallCol+'">'+( overallRate!==null?overallRate+'%':'—')+'</div>'
+          +'<div style="font-size:10px;color:var(--muted)">overall ('+totalAll+' triggered)</div>'
+        +'</div>'
+        +'<div style="flex:1;text-align:center">'
+          +'<div style="font-size:18px;font-weight:900;font-family:var(--mono);color:var(--green)">'+( promoRate!==null?promoRate+'%':'—')+'</div>'
+          +'<div style="font-size:10px;color:var(--muted)">🔬 promoted ('+pt.promoted.total+')</div>'
+        +'</div>'
+        +'<div style="flex:1;text-align:center">'
+          +'<div style="font-size:18px;font-weight:900;font-family:var(--mono);color:var(--gold)">'+( watchRate!==null?watchRate+'%':'—')+'</div>'
+          +'<div style="font-size:10px;color:var(--muted)">⚠️ watchout ('+pt.watchout.total+')</div>'
+        +'</div>'
+      +'</div>'
+      // Baseline comparison
+      +(function(){
+        var baseline=Math.round(shopBaselineHitRate(letter)*100);
+        var lift=overallRate!==null?overallRate-baseline:null;
+        var liftCol=lift===null?'var(--muted)':lift>=10?'var(--green)':lift>=0?'var(--gold)':'var(--red)';
+        return '<div style="font-size:11px;color:var(--muted)">Shop baseline hit rate: <strong>'+baseline+'%</strong>'
+          +(lift!==null?' · Triggered lift: <strong style="color:'+liftCol+'">'+(lift>0?'+':'')+lift+'%</strong>':'')
+          +'</div>';
+      })()
+      // Score band calibration — does higher score = higher hit rate?
+      +(function(){
+        var bands=Object.keys(perf.byScoreBand).map(Number).sort(function(a,b){return a-b;});
+        if(bands.length<2) return '';
+        var barMaxH=40;
+        var barsHtml='<div style="display:flex;align-items:flex-end;gap:2px;height:'+barMaxH+'px;margin-top:8px;margin-bottom:3px">';
+        bands.forEach(function(b){
+          var bd=perf.byScoreBand[b];
+          var rate=bd.total>0?Math.round(bd.hit/bd.total*100):0;
+          var h=Math.max(3,Math.round(rate*barMaxH/100));
+          var col=rate>=60?'var(--green)':rate>=30?'var(--gold)':'var(--red)';
+          barsHtml+='<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:1px">'
+            +'<div style="font-size:9px;color:'+col+';height:12px;line-height:12px">'+rate+'%</div>'
+            +'<div style="width:100%;height:'+h+'px;background:'+col+';border-radius:2px 2px 0 0;min-width:10px"></div>'
+            +'</div>';
+        });
+        barsHtml+='</div>';
+        barsHtml+='<div style="display:flex;gap:2px">';
+        bands.forEach(function(b){barsHtml+='<div style="flex:1;font-size:8px;color:var(--muted);text-align:center">'+b+'%</div>';});
+        barsHtml+='</div>';
+        barsHtml+='<div style="font-size:9px;color:var(--muted);margin-top:3px">Score band → actual hit rate. Higher score should → higher hit rate (confirms score is meaningful).</div>';
+        return barsHtml;
+      })()
+      +'</div>';
+
+    // Per-code hit check table
+    html+='<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:5px">Per-code hit check</div>';
+    html+='<div style="font-size:9px;color:var(--muted);display:grid;grid-template-columns:28px 44px 44px 44px 1fr;gap:4px;padding:2px 0;border-bottom:1px solid var(--border);margin-bottom:3px">'
+      +'<span>CODE</span><span style="text-align:center">RATE</span><span style="text-align:center">🔬</span><span style="text-align:center">⚠️</span><span>SCORE (hit/miss)</span>'
+      +'</div>';
+
+    html+=perf.perCode.map(function(pc){
+      var rateCol=pc.hitRate>=60?'var(--green)':pc.hitRate>=30?'var(--gold)':'var(--red)';
+      var promoCell=pc.promoted.total>0
+        ?'<span style="font-family:var(--mono);font-weight:700;color:'+(pc.promotedRate>=60?'var(--green)':pc.promotedRate>=30?'var(--gold)':'var(--red)')+'">'+pc.promotedRate+'%</span>'
+        +'<span style="font-size:9px;color:var(--muted)"> ('+pc.promoted.total+')</span>'
+        :'<span style="color:var(--muted)">—</span>';
+      var watchCell=pc.watchout.total>0
+        ?'<span style="font-family:var(--mono);font-weight:700;color:'+(pc.watchoutRate>=60?'var(--green)':pc.watchoutRate>=30?'var(--gold)':'var(--red)')+'">'+pc.watchoutRate+'%</span>'
+        +'<span style="font-size:9px;color:var(--muted)"> ('+pc.watchout.total+')</span>'
+        :'<span style="color:var(--muted)">—</span>';
+      var scoreNote='';
+      if(pc.avgScoreOnHit!==null&&pc.avgScoreOnMiss!==null){
+        scoreNote='<span style="color:var(--green)">hit:'+pc.avgScoreOnHit+'%</span> <span style="color:var(--red)">miss:'+pc.avgScoreOnMiss+'%</span>';
+      } else if(pc.avgScoreOnHit!==null){
+        scoreNote='<span style="color:var(--green)">hit avg:'+pc.avgScoreOnHit+'%</span>';
+      }
+      return '<div style="display:grid;grid-template-columns:28px 44px 44px 44px 1fr;gap:4px;align-items:center;padding:5px 0;border-bottom:1px solid var(--border)">'
+        +'<span style="font-family:var(--mono);font-weight:800;font-size:13px;color:'+rateCol+'">'+pc.code+'</span>'
+        +'<div style="text-align:center"><span style="font-family:var(--mono);font-weight:800;font-size:12px;color:'+rateCol+'">'+pc.hitRate+'%</span><div style="font-size:9px;color:var(--muted)">'+pc.total+' total</div></div>'
+        +'<div style="text-align:center">'+promoCell+'</div>'
+        +'<div style="text-align:center">'+watchCell+'</div>'
+        +'<div style="font-size:10px">'+scoreNote+'</div>'
+        +'</div>';
+    }).join('');
+
+    html+='<div style="font-size:9px;color:var(--muted);margin-top:5px">RATE = appeared/triggered · 🔬 promoted · ⚠️ watchout · Score = avg at prediction time</div>';
+  }
+
+  // ── Instance history (dot trail with score bars) ──
+  var resolved2=preds.filter(function(p){
+    return p.status!=='pending'&&p.outcome&&p.actualCodes&&
       ((p.promotedCodes&&p.promotedCodes.length)||(p.watchoutCodes&&p.watchoutCodes.length));
   });
 
-  if(!resolved.length){
+  if(!resolved2.length&&!hasPerf){
     el.innerHTML='<p style="font-size:12px;color:var(--muted);padding:6px 0">No triggered history yet. Promoted and watchout codes will appear here after predictions resolve.</p>';
     return;
   }
 
-  // Build aggregate stats: per code, how often was it triggered and how often did it hit
-  var codeStats={};
-  resolved.forEach(function(p){
-    var triggered=Array.from(new Set(
-      (p.promotedCodes||[]).concat(p.watchoutCodes||[])
-        .filter(function(c){return p.predictedCodes.indexOf(c)===-1;}) // outside top-5 only
-    ));
-    triggered.forEach(function(c){
-      if(!codeStats[c]) codeStats[c]={code:c,triggered:0,hit:0,watchout:0,promoted:0,preds:[]};
-      codeStats[c].triggered++;
-      if(p.watchoutCodes&&p.watchoutCodes.indexOf(c)>-1) codeStats[c].watchout++;
-      if(p.promotedCodes&&p.promotedCodes.indexOf(c)>-1) codeStats[c].promoted++;
-      var appeared=p.actualCodes.indexOf(c)>-1;
-      if(appeared) codeStats[c].hit++;
-      // Compute score % at prediction time
-      var pScores=p.scores||{};
-      var localMax=Math.max.apply(null,Object.values(pScores).concat([0.001]));
-      var scorePct=pScores[c]?Math.round(pScores[c]/localMax*100):null;
-      codeStats[c].preds.push({
-        date:p.actualDate||p.createdDate,
-        appeared:appeared,
-        scorePct:scorePct,
-        type:(p.promotedCodes&&p.promotedCodes.indexOf(c)>-1)?'promoted':'watchout'
+  if(resolved2.length){
+    // Build instance stats from prediction records for the dot trail
+    var codeStats={};
+    resolved2.forEach(function(p){
+      var triggered=Array.from(new Set(
+        (p.promotedCodes||[]).concat(p.watchoutCodes||[])
+          .filter(function(c){return p.predictedCodes.indexOf(c)===-1;})
+      ));
+      var sc=p.scores||{};
+      var maxS=Math.max.apply(null,Object.values(sc).concat([0.001]));
+      triggered.forEach(function(c){
+        if(!codeStats[c]) codeStats[c]={code:c,triggered:0,hit:0,watchout:0,promoted:0,preds:[]};
+        codeStats[c].triggered++;
+        if(p.watchoutCodes&&p.watchoutCodes.indexOf(c)>-1) codeStats[c].watchout++;
+        if(p.promotedCodes&&p.promotedCodes.indexOf(c)>-1) codeStats[c].promoted++;
+        var appeared=p.actualCodes.indexOf(c)>-1;
+        if(appeared) codeStats[c].hit++;
+        // Use triggeredOutcome scorePct if available, else compute from scores
+        var tOut=p.triggeredOutcome&&p.triggeredOutcome[c];
+        var scorePct=tOut&&tOut.scorePct!==null?tOut.scorePct:(sc[c]?Math.round(sc[c]/maxS*100):null);
+        codeStats[c].preds.push({date:p.actualDate||p.createdDate,appeared:appeared,scorePct:scorePct,
+          type:(p.promotedCodes&&p.promotedCodes.indexOf(c)>-1)?'promoted':'watchout'});
       });
     });
-  });
 
-  // Sort by hit rate desc, then triggered count
-  var sorted=Object.values(codeStats).sort(function(a,b){
-    var rA=a.triggered>0?a.hit/a.triggered:0;
-    var rB=b.triggered>0?b.hit/b.triggered:0;
-    if(rB!==rA) return rB-rA;
-    return b.triggered-a.triggered;
-  });
+    var sorted2=Object.values(codeStats).sort(function(a,b){
+      var rA=a.triggered>0?a.hit/a.triggered:0;
+      var rB=b.triggered>0?b.hit/b.triggered:0;
+      return rB!==rA?rB-rA:b.triggered-a.triggered;
+    });
 
-  // Summary header
-  var totalTriggered=sorted.reduce(function(s,c){return s+c.triggered;},0);
-  var totalHit=sorted.reduce(function(s,c){return s+c.hit;},0);
-  var overallRate=totalTriggered>0?Math.round(totalHit/totalTriggered*100):0;
-  var rateCol=overallRate>=50?'var(--green)':overallRate>=25?'var(--gold)':'var(--red)';
-
-  var html='<div style="display:flex;gap:12px;font-size:12px;margin-bottom:10px;padding:8px;background:var(--surface2);border-radius:8px">'
-    +'<span style="color:var(--muted)">'+(sorted.length)+' code'+(sorted.length>1?'s':'')+' triggered</span>'
-    +'<span style="color:var(--muted)">'+totalTriggered+' times</span>'
-    +'<span style="margin-left:auto;font-family:var(--mono);font-weight:800;color:'+rateCol+'">'+overallRate+'% hit rate</span>'
-    +'</div>';
-
-  // Column header
-  html+='<div style="font-size:9px;color:var(--muted);display:grid;'
-    +'grid-template-columns:28px 1fr 44px 44px 44px;gap:6px;'
-    +'padding:2px 0;border-bottom:1px solid var(--border);margin-bottom:4px">'
-    +'<span>CODE</span><span>HISTORY (newest first)</span>'
-    +'<span style="text-align:center">TRIG</span>'
-    +'<span style="text-align:center">HIT</span>'
-    +'<span style="text-align:center">RATE</span>'
-    +'</div>';
-
-  html+=sorted.map(function(cs){
-    var rate=cs.triggered>0?Math.round(cs.hit/cs.triggered*100):0;
-    var rateCol=rate>=60?'var(--green)':rate>=30?'var(--gold)':'var(--red)';
-
-    // Dot trail with score % — each instance shows score at prediction time
-    var dots=cs.preds.slice().reverse().slice(0,10).map(function(pr){
-      var dotCol=pr.appeared?'var(--green)':'var(--red)';
-      var typeIcon=pr.type==='promoted'?'🔬':'⚠️';
-      var scoreStr=pr.scorePct!==null?' '+pr.scorePct+'%':'';
-      return '<span title="'+pr.date+' — '+(pr.appeared?'HIT':'MISS')+' ('+pr.type+')'+(scoreStr?' · score'+scoreStr:'')+'" '
-        +'style="display:inline-flex;align-items:center;justify-content:center;'
-        +'width:18px;height:18px;border-radius:50%;'
-        +'background:'+(pr.appeared?'rgba(62,207,142,.2)':'rgba(247,95,95,.15)')+';'
-        +'border:1px solid '+dotCol+';font-size:8px;margin-right:2px">'+typeIcon+'</span>';
-    }).join('');
-
-    // Score bar row — compact bars showing score % at each prediction time
-    var scoreBars=cs.preds.slice().reverse().slice(0,10).map(function(pr){
-      var dotCol=pr.appeared?'var(--green)':'var(--red)';
-      if(pr.scorePct===null) return '<div style="width:18px;margin-right:2px"></div>';
-      return '<div style="display:inline-flex;flex-direction:column;align-items:center;'
-        +'width:18px;margin-right:2px;gap:1px">'
-        +'<span style="font-size:8px;font-family:var(--mono);color:'+dotCol+';line-height:1">'+pr.scorePct+'</span>'
-        +'<div style="width:14px;height:3px;background:var(--surface2);border-radius:2px;overflow:hidden">'
-          +'<div style="width:'+pr.scorePct+'%;height:100%;background:'+dotCol+'"></div>'
-        +'</div>'
+    if(sorted2.length){
+      html+='<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;margin:10px 0 6px">Instance trail</div>';
+      html+='<div style="font-size:9px;color:var(--muted);display:grid;grid-template-columns:28px 1fr 44px 44px 44px;gap:6px;padding:2px 0;border-bottom:1px solid var(--border);margin-bottom:4px">'
+        +'<span>CODE</span><span>HISTORY (newest first)</span><span style="text-align:center">TRIG</span><span style="text-align:center">HIT</span><span style="text-align:center">RATE</span>'
         +'</div>';
-    }).join('');
 
-    // Type badges
-    var typeBadges='';
-    if(cs.promoted) typeBadges+='<span style="font-size:9px;color:var(--green);background:rgba(62,207,142,.1);padding:1px 5px;border-radius:6px;margin-right:3px">🔬 '+cs.promoted+'×</span>';
-    if(cs.watchout) typeBadges+='<span style="font-size:9px;color:var(--gold);background:rgba(245,158,11,.1);padding:1px 5px;border-radius:6px">⚠️ '+cs.watchout+'×</span>';
-
-    return '<div style="display:grid;grid-template-columns:28px 1fr 44px 44px 44px;'
-      +'gap:6px;align-items:center;padding:7px 0;border-bottom:1px solid var(--border)">'
-      +'<span style="font-family:var(--mono);font-weight:900;font-size:14px;color:'+rateCol+'">'+cs.code+'</span>'
-      +'<div>'
-        +'<div style="display:flex;flex-wrap:wrap;margin-bottom:4px">'+dots+'</div>'
-        +'<div style="display:flex;flex-wrap:wrap;margin-bottom:4px">'+scoreBars+'</div>'
-        +'<div>'+typeBadges+'</div>'
-      +'</div>'
-      +'<span style="text-align:center;font-size:12px;color:var(--muted)">'+cs.triggered+'</span>'
-      +'<span style="text-align:center;font-size:12px;color:var(--green)">'+cs.hit+'</span>'
-      +'<span style="text-align:center;font-size:12px;font-family:var(--mono);font-weight:700;color:'+rateCol+'">'+rate+'%</span>'
-      +'</div>';
-  }).join('');
-
-  if(sorted.length>0){
-    html+='<div style="font-size:10px;color:var(--muted);margin-top:6px">'
-      +'🔬 = promoted by emergent pattern · ⚠️ = watchout triggered · dot = each instance'
-      +'</div>';
+      html+=sorted2.map(function(cs){
+        var rate=cs.triggered>0?Math.round(cs.hit/cs.triggered*100):0;
+        var rc=rate>=60?'var(--green)':rate>=30?'var(--gold)':'var(--red)';
+        var dots=cs.preds.slice().reverse().slice(0,10).map(function(pr){
+          var dc=pr.appeared?'var(--green)':'var(--red)';
+          var scoreStr=pr.scorePct!==null?' '+pr.scorePct+'%':'';
+          return '<span title="'+pr.date+' — '+(pr.appeared?'HIT':'MISS')+' ('+pr.type+')'+scoreStr+'" '
+            +'style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;'
+            +'background:'+(pr.appeared?'rgba(62,207,142,.2)':'rgba(247,95,95,.15)')+';'
+            +'border:1px solid '+dc+';font-size:8px;margin-right:2px">'+(pr.type==='promoted'?'🔬':'⚠️')+'</span>';
+        }).join('');
+        var bars=cs.preds.slice().reverse().slice(0,10).map(function(pr){
+          var dc=pr.appeared?'var(--green)':'var(--red)';
+          if(pr.scorePct===null) return '<div style="width:18px;margin-right:2px"></div>';
+          return '<div style="display:inline-flex;flex-direction:column;align-items:center;width:18px;margin-right:2px;gap:1px">'
+            +'<span style="font-size:8px;font-family:var(--mono);color:'+dc+';line-height:1">'+pr.scorePct+'</span>'
+            +'<div style="width:14px;height:3px;background:var(--surface2);border-radius:2px;overflow:hidden"><div style="width:'+pr.scorePct+'%;height:100%;background:'+dc+'"></div></div>'
+            +'</div>';
+        }).join('');
+        var badges=''
+          +(cs.promoted?'<span style="font-size:9px;color:var(--green);background:rgba(62,207,142,.1);padding:1px 5px;border-radius:6px;margin-right:3px">🔬 '+cs.promoted+'×</span>':'')
+          +(cs.watchout?'<span style="font-size:9px;color:var(--gold);background:rgba(245,158,11,.1);padding:1px 5px;border-radius:6px">⚠️ '+cs.watchout+'×</span>':'');
+        return '<div style="display:grid;grid-template-columns:28px 1fr 44px 44px 44px;gap:6px;align-items:center;padding:7px 0;border-bottom:1px solid var(--border)">'
+          +'<span style="font-family:var(--mono);font-weight:900;font-size:14px;color:'+rc+'">'+cs.code+'</span>'
+          +'<div>'
+            +'<div style="display:flex;flex-wrap:wrap;margin-bottom:3px">'+dots+'</div>'
+            +'<div style="display:flex;flex-wrap:wrap;margin-bottom:3px">'+bars+'</div>'
+            +'<div>'+badges+'</div>'
+          +'</div>'
+          +'<span style="text-align:center;font-size:12px;color:var(--muted)">'+cs.triggered+'</span>'
+          +'<span style="text-align:center;font-size:12px;color:var(--green)">'+cs.hit+'</span>'
+          +'<span style="text-align:center;font-size:12px;font-family:var(--mono);font-weight:700;color:'+rc+'">'+rate+'%</span>'
+          +'</div>';
+      }).join('');
+      html+='<div style="font-size:10px;color:var(--muted);margin-top:6px">🔬 promoted by pattern · ⚠️ watchout triggered</div>';
+    }
   }
 
-  el.innerHTML=html;
+  el.innerHTML=html||'<p style="font-size:12px;color:var(--muted);padding:6px 0">No triggered history yet. Promoted and watchout codes will appear here after predictions resolve.</p>';
 }
 
 function renderAccuracySummary(resolved){
@@ -8865,6 +9032,46 @@ function renderConfidence(){
   renderPredEvidenceTable();
   renderRecentPerf(activeShop,'recent-perf-content');
   if(spotlightShop) renderShopSpotlight(spotlightShop);
+  renderConfidenceList();
+}
+
+function renderConfidenceList(){
+  var el=document.getElementById('confidence-list');
+  if(!el) return;
+  db=loadDB();
+  var shops=Object.keys(db.shops).sort();
+  if(!shops.length){
+    el.innerHTML='<p style="font-size:12px;color:var(--muted)">No shops yet.</p>';
+    return;
+  }
+  el.innerHTML=shops.map(function(code){
+    var conf=calcShopConfidence(code);
+    if(!conf) return '';
+    var gradeCol={A:'var(--green)',B:'var(--accent)',C:'var(--gold)',D:'var(--red)',N:'var(--muted)'}[conf.grade]||'var(--muted)';
+    return '<div style="padding:10px 0;border-bottom:1px solid var(--border)">'
+      +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">'
+        +'<span style="font-family:var(--mono);font-weight:900;font-size:15px;color:var(--accent)">'+code+'</span>'
+        +(conf.name?'<span style="font-size:11px;color:var(--muted)">'+conf.name+'</span>':'')
+        +'<span style="margin-left:auto;font-size:18px;font-weight:900;font-family:var(--mono);color:'+gradeCol+'">'+conf.grade+'</span>'
+        +'<span style="font-size:12px;font-family:var(--mono);color:'+gradeCol+'">'+conf.total+'/100</span>'
+      +'</div>'
+      +Object.entries(conf.dims).map(function(d){
+        var name=d[0],dim=d[1];
+        var pct=Math.round(dim.score/dim.max*100);
+        var barCol=pct>=80?'var(--green)':pct>=50?'var(--gold)':'var(--red)';
+        return '<div style="margin-bottom:4px">'
+          +'<div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-bottom:2px">'
+            +'<span>'+name+'</span>'
+            +'<span>'+dim.score+'/'+dim.max+' — '+dim.detail+'</span>'
+          +'</div>'
+          +'<div style="height:4px;background:var(--surface2);border-radius:2px;overflow:hidden">'
+            +'<div style="width:'+pct+'%;height:100%;background:'+barCol+'"></div>'
+          +'</div>'
+          +'</div>';
+      }).join('')
+      +'<div style="font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5">'+conf.verdict+'</div>'
+      +'</div>';
+  }).join('');
 }
 
 function renderLeagueTable(){
