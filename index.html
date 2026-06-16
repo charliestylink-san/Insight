@@ -715,6 +715,13 @@ label{display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bot
         <div id="bias-chart"></div>
       </div>
       <div class="card">
+        <div class="card-title">📐 LEARNED THRESHOLDS — Empirical score-to-hit mapping</div>
+        <p style="font-size:11px;color:var(--muted);margin-bottom:10px;line-height:1.5">
+          For each code, the score % where historical hit rate crosses 70%. Codes currently above their threshold are more likely to hit.
+        </p>
+        <div id="learned-thresholds"></div>
+      </div>
+      <div class="card">
         <div class="card-title">📋 EVIDENCE LEDGER — Model decisions vs outcomes</div>
         <p style="font-size:11px;color:var(--muted);margin-bottom:10px;line-height:1.5">
           Every model decision — observation window changes, weight updates, emergent pattern promotions —
@@ -726,6 +733,11 @@ label{display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bot
       <div id="pending-list"></div>
       <div class="section-head">✅ RESOLVED — Prediction history</div>
       <div id="resolved-list"></div>
+      <div class="section-head">⚡ TRIGGERED — Promoted & watchout codes outside top-5</div>
+      <p style="font-size:11px;color:var(--muted);padding:0 0 8px;line-height:1.5">
+        Codes flagged by patterns, watchouts, or promotions that weren't in the top-5. Tracks whether they actually arrived.
+      </p>
+      <div id="triggered-history"></div>
     </div>
   </div>
 
@@ -1555,6 +1567,8 @@ function autoResolve(letter, actualDate, actualCodes){
     if(worstStatus==='miss'||worstStatus==='partial'){
       triggerAutoBacktest(letter, worstStatus);
     }
+    // Learn thresholds from updated prediction history
+    setTimeout(function(){ learnAndStoreThresholds(letter); }, 100);
   }
 
   return {
@@ -3224,6 +3238,94 @@ function buildMissAttribution(code, entries, preds, resolvedPred){
 // Uses resolved prediction history for this code.
 // Returns {thresholdPct, hitRateAbove, hitRateBelow, hitRateBelowThreshold,
 //          reliability, totalPreds, message}
+// ── THRESHOLD LEARNING PASS ───────────────
+// Runs across all resolved predictions for a shop, computes the empirical
+// score threshold for every code with enough history, and stores results.
+// Called after Rebuild and after each resolved prediction.
+function learnAndStoreThresholds(letter){
+  db=loadDB();
+  var entries=shopEntries(letter);
+  var preds=shopPreds(letter);
+  var resolved=preds.filter(function(p){return p.status!=='pending'&&p.outcome&&p.scores;});
+  if(resolved.length<4) return;
+
+  var thresholds={};
+  var allCodes=Array.from(new Set(resolved.reduce(function(a,p){return a.concat(p.predictedCodes);},[]) ));
+
+  allCodes.forEach(function(code){
+    var thresh=buildScoreThreshold(code,entries,preds);
+    if(thresh&&thresh.reliability!=='insufficient'){
+      thresholds[code]={
+        thresholdPct:thresh.thresholdPct,
+        hitRateAbove:thresh.hitRateAbove,
+        hitRateBelow:thresh.hitRateBelowThreshold,
+        aboveN:thresh.aboveN,
+        belowN:thresh.belowN,
+        lift:thresh.lift,
+        reliability:thresh.reliability,
+        lowScoreHitsNote:thresh.lowScoreHitsNote||null,
+        learnedAt:new Date().toISOString()
+      };
+    }
+  });
+
+  // Also compute shop-level threshold (the score band where overall hit rate ≥60%)
+  var shopT=buildShopThresholds(entries,preds);
+  var surpriseT=buildSurpriseThreshold(entries,preds);
+
+  db.shops[letter].learnedThresholds={
+    perCode:thresholds,
+    shopLevel:shopT?{
+      threshold:shopT.shopThreshold,
+      overallHitRate:shopT.overallHitRate,
+      bands:shopT.bands
+    }:null,
+    surpriseLevel:surpriseT?{
+      threshold:surpriseT.surpriseThreshold,
+      overallSurpriseRate:surpriseT.overallSurpriseRate,
+      bands:surpriseT.bands
+    }:null,
+    codesLearned:Object.keys(thresholds).length,
+    resolvedCount:resolved.length,
+    learnedAt:new Date().toISOString()
+  };
+
+  saveDB(db);
+  return db.shops[letter].learnedThresholds;
+}
+
+// Get stored threshold for a code — falls back to live computation if not stored
+function getStoredThreshold(letter, code){
+  db=loadDB();
+  var lt=db.shops[letter]&&db.shops[letter].learnedThresholds;
+  if(lt&&lt.perCode&&lt.perCode[code]) return lt.perCode[code];
+  return null; // not yet learned
+}
+
+// Classify a score against the learned threshold
+// Returns {zone, label, col, above, thresholdPct, confidence}
+function classifyScoreVsThreshold(letter, code, scorePct){
+  var thresh=getStoredThreshold(letter,code);
+  if(!thresh) return {zone:'unknown',label:'—',col:'var(--muted)',above:null,thresholdPct:null,confidence:'none'};
+
+  var above=scorePct>=thresh.thresholdPct;
+  var zone=above?'above':'below';
+  var col=above?'var(--green)':'var(--gold)';
+  var label=above
+    ?'▲ '+thresh.thresholdPct+'% (hits '+thresh.hitRateAbove+'%)'
+    :'▼ '+thresh.thresholdPct+'% (hits '+(thresh.hitRateBelow||0)+'%)';
+
+  return {
+    zone:zone, label:label, col:col, above:above,
+    thresholdPct:thresh.thresholdPct,
+    hitRateAbove:thresh.hitRateAbove,
+    hitRateBelow:thresh.hitRateBelow,
+    lift:thresh.lift,
+    reliability:thresh.reliability,
+    confidence:thresh.reliability
+  };
+}
+
 function buildScoreThreshold(code, entries, preds){
   var resolved = preds.filter(function(p){
     return p.status!=='pending' && p.outcome && p.predictedCodes.indexOf(code)>-1 && p.scores;
@@ -5347,10 +5449,11 @@ function renderAnalytics(){
 
     // Compute per-signal hit rates across all predicted codes
     var sigHitRates={};
-    if(resolved.length>=3){
+    var resolvedForSig=preds.filter(function(p){return p.status!=='pending'&&p.outcome&&p.signalSnapshot;});
+    if(resolvedForSig.length>=3){
       SIGNAL_KEYS.forEach(function(k){
         var highTotal=0,highHits=0,lowTotal=0,lowHits=0;
-        resolved.forEach(function(p){
+        resolvedForSig.forEach(function(p){
           p.predictedCodes.forEach(function(c){
             var snap=p.signalSnapshot&&p.signalSnapshot[c];
             if(!snap) return;
@@ -6301,14 +6404,19 @@ function renderDashboard(){
       var consensusBadge='<span style="font-size:9px;padding:1px 5px;border-radius:6px;font-weight:700;'
         +'background:rgba(0,0,0,.2);color:'+consensus.col+'">'+consensus.yes+'↑ '+consensus.no+'↓</span>';
 
-      // Score threshold
-      var thresh=buildScoreThreshold(code,entries,preds);
+      // Score threshold — use stored learned threshold, fall back to live computation
+      var storedThresh=getStoredThreshold(activeShop,code);
+      var thresh=storedThresh||buildScoreThreshold(code,entries,preds);
       var threshNote='';
       if(thresh&&thresh.reliability!=='insufficient'){
-        var thCol=pct>=thresh.thresholdPct?'var(--green)':'var(--gold)';
-        threshNote='<span style="font-size:9px;color:'+thCol+';margin-left:3px">'
-          +(pct>=thresh.thresholdPct?'▲ above threshold ('+thresh.thresholdPct+'%)':'▼ below threshold ('+thresh.thresholdPct+'%)')
-          +'</span>';
+        var threshPct=thresh.thresholdPct||storedThresh&&storedThresh.thresholdPct;
+        var hitAbove=thresh.hitRateAbove||storedThresh&&storedThresh.hitRateAbove;
+        if(threshPct){
+          var thCol=pct>=threshPct?'var(--green)':'var(--gold)';
+          threshNote='<span style="font-size:9px;color:'+thCol+';margin-left:3px">'
+            +(pct>=threshPct?'▲ '+threshPct+'% ('+hitAbove+'% hit)':'▼ '+threshPct+'%')
+            +'</span>';
+        }
       }
 
       // Per-code confidence grade — combines consensus, threshold, bias, obs window, momentum
@@ -6608,7 +6716,9 @@ function renderTrack(){
 
   renderAccuracySummary(resolved);
   renderBiasChart(preds);
+  renderLearnedThresholds(activeShop, 'learned-thresholds');
   renderEvidenceLedger(activeShop, 'evidence-ledger');
+  renderTriggeredHistory(activeShop, 'triggered-history');
   var pendEl=document.getElementById('pending-list');
   pendEl.innerHTML=pending.length
     ?pending.map(function(p){return predCardHTML(p,true);}).join('')
@@ -6726,6 +6836,249 @@ function predCardHTML(pred, canResolve){
     +(canResolve?'<div style="margin-top:6px">'+btns+'</div>':'')
     +'</div>';
 }
+function renderLearnedThresholds(letter, containerId){
+  var el=document.getElementById(containerId);
+  if(!el) return;
+  db=loadDB();
+  var lt=db.shops[letter]&&db.shops[letter].learnedThresholds;
+
+  if(!lt||!lt.perCode||!Object.keys(lt.perCode).length){
+    el.innerHTML='<p style="font-size:12px;color:var(--muted)">No thresholds learned yet. Run Rebuild or resolve more predictions.</p>';
+    return;
+  }
+
+  var perCode=lt.perCode;
+  var shopLevel=lt.shopLevel;
+  var surpriseLevel=lt.surpriseLevel;
+
+  // Get current scores to classify each code
+  var entries=shopEntries(letter);
+  var preds=shopPreds(letter);
+  var bcs=buildCombinedScore(entries,preds,letter);
+  var scores=bcs.scores||{};
+  var maxS=Math.max.apply(null,Object.values(scores).concat([0.001]));
+
+  // Sort codes: proven first, then by lift desc
+  var codes=Object.keys(perCode).sort(function(a,b){
+    var rA=perCode[a].reliability==='proven'?1:0;
+    var rB=perCode[b].reliability==='proven'?1:0;
+    if(rB!==rA) return rB-rA;
+    return (perCode[b].lift||0)-(perCode[a].lift||0);
+  });
+
+  // Summary stats
+  var proven=codes.filter(function(c){return perCode[c].reliability==='proven';});
+  var emerging=codes.filter(function(c){return perCode[c].reliability==='emerging';});
+
+  var html='';
+
+  // Shop-level and surprise threshold summary
+  if(shopLevel||surpriseLevel){
+    html+='<div style="display:flex;gap:10px;margin-bottom:10px;flex-wrap:wrap">';
+    if(shopLevel&&shopLevel.threshold!==null){
+      html+='<div style="flex:1;padding:8px;background:rgba(79,142,247,.08);border:1px solid rgba(79,142,247,.2);border-radius:8px">'
+        +'<div style="font-size:10px;color:var(--muted);margin-bottom:2px">SHOP HIT THRESHOLD</div>'
+        +'<div style="font-size:18px;font-weight:900;font-family:var(--mono);color:var(--accent)">'+shopLevel.threshold+'%+</div>'
+        +'<div style="font-size:10px;color:var(--muted)">Overall: '+shopLevel.overallHitRate+'% hit rate</div>'
+        +'</div>';
+    }
+    if(surpriseLevel&&surpriseLevel.threshold!==null){
+      html+='<div style="flex:1;padding:8px;background:rgba(232,121,249,.08);border:1px solid rgba(232,121,249,.2);border-radius:8px">'
+        +'<div style="font-size:10px;color:var(--muted);margin-bottom:2px">SURPRISE ZONE</div>'
+        +'<div style="font-size:18px;font-weight:900;font-family:var(--mono);color:var(--sig-momentum)">'+surpriseLevel.threshold+'%+</div>'
+        +'<div style="font-size:10px;color:var(--muted)">Surprise rate: '+surpriseLevel.overallSurpriseRate+'%</div>'
+        +'</div>';
+    }
+    html+='</div>';
+  }
+
+  // Header
+  html+='<div style="font-size:10px;color:var(--muted);margin-bottom:6px">'
+    +proven.length+' proven · '+emerging.length+' emerging · '+lt.codesLearned+' total · '+lt.resolvedCount+' predictions · learned '+(lt.learnedAt?lt.learnedAt.slice(0,10):'?')
+    +'</div>';
+
+  // Column header
+  html+='<div style="font-size:9px;color:var(--muted);display:grid;grid-template-columns:28px 1fr 40px 40px 40px 50px;gap:4px;padding:2px 0;border-bottom:1px solid var(--border);margin-bottom:3px">'
+    +'<span>CODE</span><span>THRESHOLD BAR</span><span style="text-align:right">THR%</span>'
+    +'<span style="text-align:right">▲HIT%</span><span style="text-align:right">▼HIT%</span>'
+    +'<span style="text-align:right">STATUS</span>'
+    +'</div>';
+
+  html+=codes.slice(0,15).map(function(c){
+    var t=perCode[c];
+    var currentPct=scores[c]?Math.round(scores[c]/maxS*100):null;
+    var above=currentPct!==null&&currentPct>=t.thresholdPct;
+    var relCol=t.reliability==='proven'?'var(--green)':'var(--gold)';
+    var aboveCol=above?'var(--green)':'var(--muted)';
+
+    // Threshold bar: show threshold marker and current score position
+    var barHtml='<div style="position:relative;height:8px;background:var(--surface2);border-radius:4px;overflow:visible">'
+      // Current score bar
+      +(currentPct!==null
+        ?'<div style="position:absolute;left:0;top:0;width:'+currentPct+'%;height:100%;background:'+(above?'rgba(62,207,142,.3)':'rgba(107,114,128,.3)')+';border-radius:4px"></div>'
+        :'')
+      // Threshold marker line
+      +'<div style="position:absolute;left:'+t.thresholdPct+'%;top:-2px;width:2px;height:12px;background:var(--gold);border-radius:1px"></div>'
+      +'</div>'
+      // Labels
+      +'<div style="position:relative;height:10px;font-size:8px">'
+      +(currentPct!==null?'<span style="position:absolute;left:'+Math.min(currentPct,90)+'%;color:'+aboveCol+';transform:translateX(-50%)">'+currentPct+'%</span>':'')
+      +'</div>';
+
+    var relBadge=t.reliability==='proven'
+      ?'<span style="font-size:9px;background:rgba(62,207,142,.15);color:var(--green);padding:1px 5px;border-radius:6px">PROVEN</span>'
+      :'<span style="font-size:9px;background:rgba(245,158,11,.15);color:var(--gold);padding:1px 5px;border-radius:6px">EMERGING</span>';
+
+    return '<div style="display:grid;grid-template-columns:28px 1fr 40px 40px 40px 50px;gap:4px;align-items:center;padding:6px 0;border-bottom:1px solid var(--border)">'
+      +'<span style="font-family:var(--mono);font-weight:800;font-size:13px;color:'+(above?'var(--green)':'var(--muted)')+'">'+c+'</span>'
+      +'<div>'+barHtml+'</div>'
+      +'<span style="font-size:11px;font-family:var(--mono);font-weight:700;color:var(--gold);text-align:right">'+t.thresholdPct+'%</span>'
+      +'<span style="font-size:11px;font-family:var(--mono);font-weight:700;color:var(--green);text-align:right">'+(t.hitRateAbove||'—')+'%</span>'
+      +'<span style="font-size:11px;font-family:var(--mono);color:var(--red);text-align:right">'+(t.hitRateBelow||'—')+'%</span>'
+      +relBadge
+      +'</div>';
+  }).join('');
+
+  if(codes.length>15){
+    html+='<div style="font-size:11px;color:var(--muted);text-align:center;padding:6px 0">+'+(codes.length-15)+' more codes</div>';
+  }
+
+  html+='<div style="font-size:9px;color:var(--muted);margin-top:6px">THR% = threshold · ▲HIT% = hit rate above threshold · ▼HIT% = hit rate below · Gold line = threshold</div>';
+
+  el.innerHTML=html;
+}
+
+function renderTriggeredHistory(letter, containerId){
+  var el=document.getElementById(containerId);
+  if(!el) return;
+  db=loadDB();
+  var preds=shopPreds(letter);
+
+  // Collect all resolved predictions that had promoted or watchout codes
+  var resolved=preds.filter(function(p){
+    return p.status!=='pending' && p.outcome && p.actualCodes &&
+      ((p.promotedCodes&&p.promotedCodes.length)||(p.watchoutCodes&&p.watchoutCodes.length));
+  });
+
+  if(!resolved.length){
+    el.innerHTML='<p style="font-size:12px;color:var(--muted);padding:6px 0">No triggered history yet. Promoted and watchout codes will appear here after predictions resolve.</p>';
+    return;
+  }
+
+  // Build aggregate stats: per code, how often was it triggered and how often did it hit
+  var codeStats={};
+  resolved.forEach(function(p){
+    var triggered=Array.from(new Set(
+      (p.promotedCodes||[]).concat(p.watchoutCodes||[])
+        .filter(function(c){return p.predictedCodes.indexOf(c)===-1;}) // outside top-5 only
+    ));
+    triggered.forEach(function(c){
+      if(!codeStats[c]) codeStats[c]={code:c,triggered:0,hit:0,watchout:0,promoted:0,preds:[]};
+      codeStats[c].triggered++;
+      if(p.watchoutCodes&&p.watchoutCodes.indexOf(c)>-1) codeStats[c].watchout++;
+      if(p.promotedCodes&&p.promotedCodes.indexOf(c)>-1) codeStats[c].promoted++;
+      var appeared=p.actualCodes.indexOf(c)>-1;
+      if(appeared) codeStats[c].hit++;
+      // Compute score % at prediction time
+      var pScores=p.scores||{};
+      var localMax=Math.max.apply(null,Object.values(pScores).concat([0.001]));
+      var scorePct=pScores[c]?Math.round(pScores[c]/localMax*100):null;
+      codeStats[c].preds.push({
+        date:p.actualDate||p.createdDate,
+        appeared:appeared,
+        scorePct:scorePct,
+        type:(p.promotedCodes&&p.promotedCodes.indexOf(c)>-1)?'promoted':'watchout'
+      });
+    });
+  });
+
+  // Sort by hit rate desc, then triggered count
+  var sorted=Object.values(codeStats).sort(function(a,b){
+    var rA=a.triggered>0?a.hit/a.triggered:0;
+    var rB=b.triggered>0?b.hit/b.triggered:0;
+    if(rB!==rA) return rB-rA;
+    return b.triggered-a.triggered;
+  });
+
+  // Summary header
+  var totalTriggered=sorted.reduce(function(s,c){return s+c.triggered;},0);
+  var totalHit=sorted.reduce(function(s,c){return s+c.hit;},0);
+  var overallRate=totalTriggered>0?Math.round(totalHit/totalTriggered*100):0;
+  var rateCol=overallRate>=50?'var(--green)':overallRate>=25?'var(--gold)':'var(--red)';
+
+  var html='<div style="display:flex;gap:12px;font-size:12px;margin-bottom:10px;padding:8px;background:var(--surface2);border-radius:8px">'
+    +'<span style="color:var(--muted)">'+(sorted.length)+' code'+(sorted.length>1?'s':'')+' triggered</span>'
+    +'<span style="color:var(--muted)">'+totalTriggered+' times</span>'
+    +'<span style="margin-left:auto;font-family:var(--mono);font-weight:800;color:'+rateCol+'">'+overallRate+'% hit rate</span>'
+    +'</div>';
+
+  // Column header
+  html+='<div style="font-size:9px;color:var(--muted);display:grid;'
+    +'grid-template-columns:28px 1fr 44px 44px 44px;gap:6px;'
+    +'padding:2px 0;border-bottom:1px solid var(--border);margin-bottom:4px">'
+    +'<span>CODE</span><span>HISTORY (newest first)</span>'
+    +'<span style="text-align:center">TRIG</span>'
+    +'<span style="text-align:center">HIT</span>'
+    +'<span style="text-align:center">RATE</span>'
+    +'</div>';
+
+  html+=sorted.map(function(cs){
+    var rate=cs.triggered>0?Math.round(cs.hit/cs.triggered*100):0;
+    var rateCol=rate>=60?'var(--green)':rate>=30?'var(--gold)':'var(--red)';
+
+    // Dot trail with score % — each instance shows score at prediction time
+    var dots=cs.preds.slice().reverse().slice(0,10).map(function(pr){
+      var dotCol=pr.appeared?'var(--green)':'var(--red)';
+      var typeIcon=pr.type==='promoted'?'🔬':'⚠️';
+      var scoreStr=pr.scorePct!==null?' '+pr.scorePct+'%':'';
+      return '<span title="'+pr.date+' — '+(pr.appeared?'HIT':'MISS')+' ('+pr.type+')'+(scoreStr?' · score'+scoreStr:'')+'" '
+        +'style="display:inline-flex;align-items:center;justify-content:center;'
+        +'width:18px;height:18px;border-radius:50%;'
+        +'background:'+(pr.appeared?'rgba(62,207,142,.2)':'rgba(247,95,95,.15)')+';'
+        +'border:1px solid '+dotCol+';font-size:8px;margin-right:2px">'+typeIcon+'</span>';
+    }).join('');
+
+    // Score bar row — compact bars showing score % at each prediction time
+    var scoreBars=cs.preds.slice().reverse().slice(0,10).map(function(pr){
+      var dotCol=pr.appeared?'var(--green)':'var(--red)';
+      if(pr.scorePct===null) return '<div style="width:18px;margin-right:2px"></div>';
+      return '<div style="display:inline-flex;flex-direction:column;align-items:center;'
+        +'width:18px;margin-right:2px;gap:1px">'
+        +'<span style="font-size:8px;font-family:var(--mono);color:'+dotCol+';line-height:1">'+pr.scorePct+'</span>'
+        +'<div style="width:14px;height:3px;background:var(--surface2);border-radius:2px;overflow:hidden">'
+          +'<div style="width:'+pr.scorePct+'%;height:100%;background:'+dotCol+'"></div>'
+        +'</div>'
+        +'</div>';
+    }).join('');
+
+    // Type badges
+    var typeBadges='';
+    if(cs.promoted) typeBadges+='<span style="font-size:9px;color:var(--green);background:rgba(62,207,142,.1);padding:1px 5px;border-radius:6px;margin-right:3px">🔬 '+cs.promoted+'×</span>';
+    if(cs.watchout) typeBadges+='<span style="font-size:9px;color:var(--gold);background:rgba(245,158,11,.1);padding:1px 5px;border-radius:6px">⚠️ '+cs.watchout+'×</span>';
+
+    return '<div style="display:grid;grid-template-columns:28px 1fr 44px 44px 44px;'
+      +'gap:6px;align-items:center;padding:7px 0;border-bottom:1px solid var(--border)">'
+      +'<span style="font-family:var(--mono);font-weight:900;font-size:14px;color:'+rateCol+'">'+cs.code+'</span>'
+      +'<div>'
+        +'<div style="display:flex;flex-wrap:wrap;margin-bottom:4px">'+dots+'</div>'
+        +'<div style="display:flex;flex-wrap:wrap;margin-bottom:4px">'+scoreBars+'</div>'
+        +'<div>'+typeBadges+'</div>'
+      +'</div>'
+      +'<span style="text-align:center;font-size:12px;color:var(--muted)">'+cs.triggered+'</span>'
+      +'<span style="text-align:center;font-size:12px;color:var(--green)">'+cs.hit+'</span>'
+      +'<span style="text-align:center;font-size:12px;font-family:var(--mono);font-weight:700;color:'+rateCol+'">'+rate+'%</span>'
+      +'</div>';
+  }).join('');
+
+  if(sorted.length>0){
+    html+='<div style="font-size:10px;color:var(--muted);margin-top:6px">'
+      +'🔬 = promoted by emergent pattern · ⚠️ = watchout triggered · dot = each instance'
+      +'</div>';
+  }
+
+  el.innerHTML=html;
+}
+
 function renderAccuracySummary(resolved){
   var el=document.getElementById('accuracy-summary');
   if(!resolved.length){
@@ -9316,6 +9669,9 @@ function rebuildPredictions(){
     : 'No shops had enough entries to rebuild (need 4+).';
   var cls=totalShops>0?'alert-success':'alert-warn';
   document.getElementById('rebuild-result').innerHTML='<div class="alert '+cls+'">'+msg+'</div>';
+
+  // Learn thresholds from full prediction history for all shops
+  shops.forEach(function(letter){ learnAndStoreThresholds(letter); });
 
   if(curPanel()==='track')      renderTrack();
   if(curPanel()==='confidence') renderConfidence();
