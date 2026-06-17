@@ -843,7 +843,14 @@ label{display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bot
         This re-runs all predictions from your entry history and resolves them in date order.
         Safe to run — existing resolved predictions are replaced with corrected ones.
       </p>
-      <button class="btn btn-secondary" onclick="rebuildPredictions()">🔧 Rebuild Predictions from History</button>
+      <div style="margin-bottom:10px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Rebuild scope:</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap" id="rebuild-shop-pills"></div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-secondary" onclick="rebuildPredictions()">🔧 Rebuild All Shops</button>
+        <button class="btn btn-primary" id="rebuild-one-btn" onclick="rebuildActiveShop()" style="display:none">🔧 Rebuild Active Shop</button>
+      </div>
       <div id="rebuild-result" style="margin-top:10px"></div>
     </div>
       <p style="font-size:12px;color:var(--muted);margin-bottom:10px">
@@ -1086,6 +1093,7 @@ function showPanel(id){
   if(id==='confidence') renderConfidence();
   if(id==='guide')      renderGuide();
   if(id==='storage')    renderStoragePanel();
+  if(id==='storage')    renderRebuildPills();
 }
 function curPanel(){
   var p=document.querySelector('.panel.active');
@@ -7483,22 +7491,29 @@ function renderAccuracySummary(resolved){
     var scores=p.scores||{};
     var maxS=p.predictedCodes.reduce(function(m,c){return Math.max(m,scores[c]||0);},0.001);
 
-    // Predicted codes — one per line: code score% hit/miss
+    var entries2=shopEntries(activeShop);
+    var predsAll=shopPreds(activeShop);
+
+    // Predicted codes — grade [A-N] + rank% + hit/miss
     var codeLines=p.predictedCodes.map(function(c){
       var isHit=p.outcome[c]==='hit';
       var sp=Math.round((scores[c]||0)/maxS*100);
       var col=isHit?'var(--green)':'var(--red)';
       var icon=isHit?'✓':'✗';
-      // Check promoted
       var isPromoted=p.promotedCodes&&p.promotedCodes.indexOf(c)>-1;
-      return '<div style="display:flex;align-items:center;gap:4px;margin-bottom:1px">'
-        +'<span style="font-family:var(--mono);font-size:11px;font-weight:700;color:'+col+';min-width:22px">'+c+'</span>'
-        +(isPromoted?'<span style="font-size:9px;color:var(--green)">🔬</span>':'')
-        +'<span style="font-size:10px;color:'+col+'">'+icon+'</span>'
-        +'<div style="flex:1;height:3px;background:var(--surface2);border-radius:2px;overflow:hidden">'
+      // Grade from buildCodeConfidenceGrade using snapshot at prediction time
+      var snap=p.signalSnapshot&&p.signalSnapshot[c]||{};
+      var wts=p.weightsAtTime||DEFAULT_WEIGHTS;
+      var grade=buildCodeConfidenceGrade(c,snap,wts,entries2,predsAll,activeShop,sp);
+      return '<div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">'
+        +'<span style="font-family:var(--mono);font-size:12px;font-weight:900;color:'+col+';min-width:24px">'+c+'</span>'
+        +(isPromoted?'<span style="font-size:9px">🔬</span>':'<span style="min-width:14px"></span>')
+        +'<span style="font-size:11px;font-weight:700;color:'+col+'">'+icon+'</span>'
+        +'<span style="font-size:11px;font-weight:900;font-family:var(--mono);color:'+grade.col+';min-width:22px">['+grade.grade+']</span>'
+        +'<div style="flex:1;height:4px;background:var(--surface2);border-radius:2px;overflow:hidden">'
           +'<div style="width:'+sp+'%;height:100%;background:'+col+'"></div>'
         +'</div>'
-        +'<span style="font-size:10px;font-family:var(--mono);color:'+col+';min-width:28px;text-align:right">'+sp+'%</span>'
+        +'<span style="font-size:10px;font-family:var(--mono);color:var(--muted);min-width:32px;text-align:right">'+sp+'%</span>'
         +'</div>';
     }).join('');
 
@@ -7544,21 +7559,25 @@ function renderAccuracySummary(resolved){
           var typeIcon=t.type==='promoted'?'🔬':'⚠️';
           var col=t.appeared?'var(--green)':'var(--muted)';
           var icon=t.appeared?'✓':'·';
-          // Robust score: use stored scorePct first, then compute from scores map
           var sp=t.scorePct!==null&&t.scorePct!==undefined
             ?t.scorePct
             :(scores[c]?Math.round(scores[c]/fullMaxS*100):null);
           var barCol=t.type==='promoted'?'var(--green)':'var(--gold)';
+          // Grade for triggered codes
+          var snap2=p.signalSnapshot&&p.signalSnapshot[c]||{};
+          var wts2=p.weightsAtTime||DEFAULT_WEIGHTS;
+          var grade2=buildCodeConfidenceGrade(c,snap2,wts2,entries2,predsAll,activeShop,sp||0);
           triggLines+='<div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">'
             +'<span style="font-size:10px;flex-shrink:0;min-width:18px">'+typeIcon+'</span>'
             +'<span style="font-family:var(--mono);font-size:12px;font-weight:900;color:'+col+';min-width:24px">'+c+'</span>'
             +'<span style="font-size:11px;font-weight:700;color:'+col+'">'+icon+'</span>'
+            +'<span style="font-size:11px;font-weight:900;font-family:var(--mono);color:'+grade2.col+';min-width:22px">['+grade2.grade+']</span>'
             +'<div style="flex:1;height:4px;background:var(--surface2);border-radius:2px;overflow:hidden">'
               +(sp!==null?'<div style="width:'+sp+'%;height:100%;background:'+barCol+'"></div>':'')
             +'</div>'
             +(sp!==null
-              ?'<span style="font-size:12px;font-family:var(--mono);font-weight:800;color:'+col+';min-width:36px;text-align:right">'+sp+'%</span>'
-              :'<span style="min-width:36px;font-size:10px;color:var(--muted);text-align:right">—</span>')
+              ?'<span style="font-size:10px;font-family:var(--mono);color:var(--muted);min-width:32px;text-align:right">'+sp+'%</span>'
+              :'<span style="min-width:32px;font-size:10px;color:var(--muted);text-align:right">—</span>')
             +'</div>';
         });
         triggLines+='</div>';
@@ -10370,7 +10389,36 @@ function fallbackDownload(blob, filename){
 // Replays the full entry history for a shop in date order, generating a prediction
 // after each entry (from the 3rd onward) and immediately resolving it against the
 // next entry. Replaces all auto predictions with correctly resolved ones.
-function rebuildPredictions(){
+function rebuildActiveShop(){
+  if(!activeShop){ showToast('Select a shop first'); return; }
+  rebuildPredictions(activeShop);
+}
+
+function renderRebuildPills(){
+  var el=document.getElementById('rebuild-shop-pills');
+  if(!el) return;
+  db=loadDB();
+  var shops=Object.keys(db.shops).sort();
+  if(!shops.length){ el.innerHTML='<span style="font-size:12px;color:var(--muted)">No shops yet.</span>'; return; }
+
+  el.innerHTML=shops.map(function(code){
+    var s=db.shops[code];
+    var n=(s.entries||[]).length;
+    var p=(s.predictions||[]).filter(function(p){return p.status!=='pending';}).length;
+    var isActive=code===activeShop;
+    return '<button onclick="rebuildPredictions(\''+code+'\')" '
+      +'style="font-family:var(--mono);font-size:12px;font-weight:700;padding:5px 12px;border-radius:20px;border:1px solid '+(isActive?'var(--accent)':'var(--border)')+';background:'+(isActive?'rgba(79,142,247,.15)':'var(--surface2)')+';color:'+(isActive?'var(--accent)':'var(--muted)')+';cursor:pointer">'
+      +code+'<span style="font-size:10px;opacity:.7"> '+n+'↓ '+p+'✓</span>'
+      +'</button>';
+  }).join('');
+
+  // Show/hide the active shop button
+  var btn=document.getElementById('rebuild-one-btn');
+  if(btn) btn.style.display=activeShop?'block':'none';
+  if(btn&&activeShop) btn.textContent='🔧 Rebuild '+activeShop+' Only';
+}
+
+function rebuildPredictions(onlyShop){
   // ── Immediate feedback ──
   // Haptic pulse (works on Android; iOS ignores silently)
   if(navigator.vibrate) navigator.vibrate([40,30,40]);
@@ -10388,13 +10436,14 @@ function rebuildPredictions(){
   var rebuildEl=document.getElementById('rebuild-result');
   if(rebuildEl) rebuildEl.innerHTML='<div class="alert alert-info" style="display:flex;align-items:center;gap:10px">'
     +'<div style="width:16px;height:16px;border:2px solid var(--accent);border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite"></div>'
-    +'<span>Rebuilding predictions…</span></div>';
+    +'<span>Rebuilding '+(onlyShop?onlyShop+' predictions':'all predictions')+'…</span></div>';
 
   // Defer heavy work so UI can repaint with the spinner first
   setTimeout(function(){
 
   db=loadDB();
   var shops=Object.keys(db.shops).sort();
+  if(onlyShop) shops=shops.filter(function(s){return s===onlyShop;});
   if(!shops.length){
     if(rebuildEl) rebuildEl.innerHTML='<div class="alert alert-warn">No shops found.</div>';
     return;
@@ -10807,6 +10856,7 @@ window.addEventListener('DOMContentLoaded',function(){
   // ── end guide ──
 
   renderShopPills();
+  renderRebuildPills();
   updateAllBanners();
   var shops=Object.keys(db.shops).sort();
   if(shops.length){
