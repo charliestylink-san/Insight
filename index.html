@@ -1385,25 +1385,28 @@ function saveTextEntry(){
   }
   // Continuity warning (non-blocking)
   showContinuityWarning(activeShop, date);
-  addEntry(activeShop,date,codes,'text');
+  var resolveResult=addEntry(activeShop,date,codes,'text');
   document.getElementById('text-input').value='';
   document.getElementById('text-tags').innerHTML='';
-  // Compare against prediction and show immediate result
-  var resolveResult=autoResolve(activeShop,date,codes);
+  // Show result using the resolve that ran before the model updated
   showRefillResultAlert(resolveResult, codes, date);
-  if(!resolveResult.hadPrediction) showWhatNextCard(codes, date, null);
+  if(!resolveResult||!resolveResult.hadPrediction) showWhatNextCard(codes, date, null);
   showBackupReminder();
   showToast('Saved to Shop '+activeShop);
 }
 
 function addEntry(letter,date,codes,source){
   db=loadDB();
+  // Resolve any pending prediction BEFORE adding the new entry and generating a new prediction.
+  // This preserves original prediction scores before the model updates with the new refill.
+  var resolveResult=autoResolve(letter,date,codes);
   shopData(letter).entries.push({id:Date.now(),date:date,codes:codes,source:source});
   shopData(letter).entries.sort(function(a,b){return a.date.localeCompare(b.date);});
   saveDB(db);
   autoSavePrediction(letter);
   renderShopPills();
   updateAllBanners();
+  return resolveResult;
 }
 
 // Auto-generate and store the current top-3 prediction after every refill entry.
@@ -1420,8 +1423,12 @@ function autoSavePrediction(letter){
   if(!top5.length) return;
   // Use the latest entry's refill date (not today) so historical batch entry resolves correctly
   var lastEntryDate = entries[entries.length-1].date;
-  // Store full scores map so triggered outcome scoring can access non-top5 code scores
-  db.shops[letter].lastFullScores=scores;
+  var top5Max=top5.length?top5[0][1]:0.001;
+  // Normalise full scores to 0-100 for stable display (prevents score % changing after new refills)
+  var fullMax=Math.max.apply(null,Object.values(scores).concat([0.001]));
+  var normFullScores={};
+  Object.keys(scores).forEach(function(c){normFullScores[c]=Math.round(scores[c]/fullMax*100);});
+  db.shops[letter].lastFullScores=normFullScores;
   db.shops[letter].predictions=preds.filter(function(p){return p.status!=='pending';});
   db.shops[letter].predictions.push({
     id:Date.now(),
@@ -1432,7 +1439,7 @@ function autoSavePrediction(letter){
     patternRules:(result.promotions||[]).map(function(p){return p.pattern&&p.pattern.rule?p.pattern.rule.slice(0,40):'pattern';}),
     watchoutCodes:(result.watchouts||[]).map(function(w){return w.code;}),
     regimeAtTime:result.regime?{shifting:result.regime.shifting,note:result.regime.note||''}:null,
-    scores:top5.reduce(function(o,x){o[x[0]]=x[1];return o;},{}),
+    scores:top5.reduce(function(o,x){o[x[0]]=Math.round(x[1]/top5Max*100);return o;},{}),
     signalSnapshot:(function(){
       var snap={};
       top5.forEach(function(x){snap[x[0]]=snapshots[x[0]]||{};});
@@ -1484,27 +1491,18 @@ function autoResolve(letter, actualDate, actualCodes){
     pred.actualCodes=actualCodes;
 
     // ── TRIGGERED OUTCOME TRACKING ──
-    // Resolve promoted and watchout codes independently of top-5
     var triggeredOutcome={};
     var allTriggered=Array.from(new Set(
       (pred.promotedCodes||[]).concat(pred.watchoutCodes||[])
-        .filter(function(c){return pred.predictedCodes.indexOf(c)===-1;}) // outside top-5 only
+        .filter(function(c){return pred.predictedCodes.indexOf(c)===-1;})
     ));
+    // lastFullScores is now normalised 0-100 — use directly
+    var fullSc=db.shops[letter]&&db.shops[letter].lastFullScores||{};
     allTriggered.forEach(function(c){
-      var appeared=actualCodes.indexOf(c)>-1;
-      // Use full scores from current build — pred.scores only has top-5
-      // Re-derive from the stored scores or fall back to partial score
-      var allPredScores=pred.scores||{};
-      // Try to find score in the full DB scores map for this shop
-      var fullSc=db.shops[letter]&&db.shops[letter].lastFullScores
-        ?db.shops[letter].lastFullScores[c]:null;
-      var sc=fullSc!==null?fullSc:(allPredScores[c]||0);
-      var topScore=Math.max.apply(null,Object.values(allPredScores).concat([0.001]));
-      var scorePct=sc>0?Math.round(sc/topScore*100):null;
       triggeredOutcome[c]={
-        appeared:appeared,
+        appeared:actualCodes.indexOf(c)>-1,
         type:(pred.promotedCodes&&pred.promotedCodes.indexOf(c)>-1)?'promoted':'watchout',
-        scorePct:scorePct
+        scorePct:fullSc[c]!=null?fullSc[c]:null
       };
     });
     pred.triggeredOutcome=triggeredOutcome;
@@ -6856,9 +6854,8 @@ function predCardHTML(pred, canResolve){
   var sLabels={pending:'⏳',hit:'✅',partial:'⚡',miss:'❌'};
   var sColors={pending:'var(--muted)',hit:'var(--green)',partial:'var(--gold)',miss:'var(--red)'};
   var scores=pred.scores||{};
-  var maxScore=Math.max.apply(null,
-    Object.values(scores).concat([0.001])
-  );
+  var rawMaxScore=Math.max.apply(null,Object.values(scores).concat([0]));
+  var maxScore=rawMaxScore>1?rawMaxScore:0.001;
   var lt=activeShop&&db.shops[activeShop]&&db.shops[activeShop].learnedThresholds||null;
 
   // ── Build unified code list ──────────────
@@ -7366,7 +7363,8 @@ function renderTriggeredHistory(letter, containerId){
           .filter(function(c){return p.predictedCodes.indexOf(c)===-1;})
       ));
       var sc=p.scores||{};
-      var maxS=Math.max.apply(null,Object.values(sc).concat([0.001]));
+      var rawMxS=Math.max.apply(null,Object.values(sc).concat([0]));
+      var maxS=rawMxS>1?rawMxS:0.001;
       triggered.forEach(function(c){
         if(!codeStats[c]) codeStats[c]={code:c,triggered:0,hit:0,watchout:0,promoted:0,preds:[]};
         codeStats[c].triggered++;
@@ -7489,7 +7487,11 @@ function renderAccuracySummary(resolved){
     var hitRate=Math.round(hits/p.predictedCodes.length*100);
     var rc=hitRate===100?'var(--green)':hitRate>=33?'var(--gold)':'var(--red)';
     var scores=p.scores||{};
-    var maxS=p.predictedCodes.reduce(function(m,c){return Math.max(m,scores[c]||0);},0.001);
+    // Scores are stored as normalised 0-100. For older predictions stored as raw values,
+    // detect by checking if max score > 1 (raw) or ≤ 100 (normalised).
+    var rawMax=Math.max.apply(null,Object.values(scores).concat([0]));
+    var isNormalised=rawMax<=100&&rawMax>=1;
+    var maxS=isNormalised?rawMax:p.predictedCodes.reduce(function(m,c){return Math.max(m,scores[c]||0);},0.001);
 
     var entries2=shopEntries(activeShop);
     var predsAll=shopPreds(activeShop);
@@ -7551,7 +7553,8 @@ function renderAccuracySummary(resolved){
         }
       });
       // Use full scores map for maxS so non-top5 codes are included
-      var fullMaxS=Math.max.apply(null,Object.values(scores).concat([0.001]));
+      var rawFull=Math.max.apply(null,Object.values(scores).concat([0]));
+      var fullMaxS=rawFull>1?rawFull:0.001;
       if(Object.keys(triggCodes).length){
         triggLines='<div style="border-top:1px solid rgba(255,255,255,.08);margin-top:4px;padding-top:4px">';
         Object.keys(triggCodes).forEach(function(c){
@@ -10485,12 +10488,13 @@ function rebuildPredictions(onlyShop){
       var slotsCovered=nextEntry.codes.filter(function(c){return top5.map(function(x){return x[0];}).indexOf(c)>-1;}).length;
       var status=resolveStatus(outcome);
 
+      var top5RebuildMax=top5.length?top5[0][1]:0.001;
       var pred={
         id:i*100000+Date.now()%100000,
         createdDate:predDate,
         targetDate:null,
         predictedCodes:top5.map(function(x){return x[0];}),
-        scores:top5.reduce(function(o,x){o[x[0]]=x[1];return o;},{}),
+        scores:top5.reduce(function(o,x){o[x[0]]=Math.round(x[1]/top5RebuildMax*100);return o;},{}),
         signalSnapshot:(function(){
           var snap={};
           top5.forEach(function(x){snap[x[0]]=result.snapshots[x[0]]||{};});
@@ -10527,6 +10531,7 @@ function rebuildPredictions(onlyShop){
             .filter(function(c){return top5Codes.indexOf(c)===-1;})
         ));
         // Use full result.scores (all codes) not pred.scores (top-5 only)
+        // Normalise full scores to 0-100 for stable display
         var fullScores=result.scores||{};
         var fullMaxS=Math.max.apply(null,Object.values(fullScores).concat([0.001]));
         var triggeredOutcome={};
