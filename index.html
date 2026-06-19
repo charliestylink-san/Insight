@@ -10425,27 +10425,14 @@ function renderRebuildPills(){
 }
 
 function rebuildPredictions(onlyShop){
-  // ── Immediate feedback ──
-  // Haptic pulse (works on Android; iOS ignores silently)
   if(navigator.vibrate) navigator.vibrate([40,30,40]);
-
-  // Button visual — all rebuild buttons flash and disable briefly
   document.querySelectorAll('button').forEach(function(btn){
     if(btn.textContent.indexOf('Rebuild')>-1){
-      btn.style.opacity='0.5';
-      btn.style.transform='scale(0.97)';
+      btn.style.opacity='0.5'; btn.style.transform='scale(0.97)';
       setTimeout(function(){btn.style.opacity='';btn.style.transform='';},300);
     }
   });
-
-  // Show spinner in rebuild-result immediately
   var rebuildEl=document.getElementById('rebuild-result');
-  if(rebuildEl) rebuildEl.innerHTML='<div class="alert alert-info" style="display:flex;align-items:center;gap:10px">'
-    +'<div style="width:16px;height:16px;border:2px solid var(--accent);border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite"></div>'
-    +'<span>Rebuilding '+(onlyShop?onlyShop+' predictions':'all predictions')+'…</span></div>';
-
-  // Defer heavy work so UI can repaint with the spinner first
-  setTimeout(function(){
 
   db=loadDB();
   var shops=Object.keys(db.shops).sort();
@@ -10454,158 +10441,168 @@ function rebuildPredictions(onlyShop){
     if(rebuildEl) rebuildEl.innerHTML='<div class="alert alert-warn">No shops found.</div>';
     return;
   }
-  var totalResolved=0, totalShops=0;
 
-  shops.forEach(function(letter){
+  var totalResolved=0, totalShops=0;
+  var shopIdx=0;
+
+  function showProgress(letter, done, total){
+    if(!rebuildEl) return;
+    var pct=total>0?Math.round(done/total*100):0;
+    rebuildEl.innerHTML='<div class="alert alert-info" style="display:flex;flex-direction:column;gap:6px">'
+      +'<div style="display:flex;align-items:center;gap:10px">'
+        +'<div style="width:16px;height:16px;border:2px solid var(--accent);border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite;flex-shrink:0"></div>'
+        +'<span style="font-size:12px">Rebuilding <strong>'+letter+'</strong> — step '+done+'/'+total+'</span>'
+      +'</div>'
+      +'<div style="height:4px;background:var(--surface2);border-radius:2px;overflow:hidden">'
+        +'<div style="width:'+pct+'%;height:100%;background:var(--accent);border-radius:2px;transition:width .2s"></div>'
+      +'</div>'
+      +'</div>';
+  }
+
+  function rebuildShop(letter, onDone){
+    db=loadDB();
     var s=db.shops[letter];
     var entries=(s.entries||[]).slice().sort(function(a,b){return a.date.localeCompare(b.date);});
-    if(entries.length<4) return;
+    if(entries.length<4){ onDone(0); return; }
 
-    // Clear all auto predictions, keep manually-locked ones
+    // Clear auto predictions and reset windows
     db.shops[letter].predictions=(s.predictions||[]).filter(function(p){return !p.auto;});
-    // Reset observation windows and gradient accumulator for clean replay
     db.shops[letter].obsWindow={};
     db.shops[letter].gradAccum={};
-    // Save the cleared state first so loadDB() sees it
     saveDB(db);
 
+    var i=2;
     var resolvedCount=0;
+    var total=entries.length-2;
 
-    for(var i=2;i<entries.length-1;i++){
-      // Always reload from storage so we have the latest predictions including weights
+    function processStep(){
+      if(i>=entries.length-1){
+        // Done — add pending prediction
+        db=loadDB();
+        var allEntries=(db.shops[letter].entries||[]).slice().sort(function(a,b){return a.date.localeCompare(b.date);});
+        if(allEntries.length>=3){
+          var allPreds=shopPreds(letter);
+          var finalResult=buildCombinedScore(allEntries,allPreds,letter);
+          var finalTop5=Object.entries(finalResult.scores).sort(function(a,b){return b[1]-a[1];}).slice(0,5);
+          if(finalTop5.length){
+            var fMax=finalTop5[0][1];
+            var fPatterns=buildEmergentPatterns(allEntries,allPreds);
+            var fApplied=applyEmergentToTop3(finalTop5.slice(),fPatterns,finalResult.scores);
+            var fWatchouts=buildWatchouts(allEntries,allPreds,finalResult,finalTop5.map(function(x){return x[0];}),letter);
+            var fFullMax=Math.max.apply(null,Object.values(finalResult.scores).concat([0.001]));
+            var fNorm={};
+            Object.keys(finalResult.scores).forEach(function(c){fNorm[c]=Math.round(finalResult.scores[c]/fFullMax*100);});
+            db.shops[letter].lastFullScores=fNorm;
+            db.shops[letter].predictions.push({
+              id:Date.now(),
+              createdDate:allEntries[allEntries.length-1].date,
+              targetDate:null,
+              predictedCodes:finalTop5.map(function(x){return x[0];}),
+              promotedCodes:(fApplied.promotions||[]).map(function(p){return p.promoted;}),
+              patternRules:(fApplied.promotions||[]).map(function(p){return p.pattern&&p.pattern.rule?p.pattern.rule.slice(0,40):'pattern';}),
+              watchoutCodes:fWatchouts.map(function(w){return w.code;}),
+              regimeAtTime:finalResult.regime?{shifting:finalResult.regime.shifting,note:finalResult.regime.note||''}:null,
+              scores:finalTop5.reduce(function(o,x){o[x[0]]=Math.round(x[1]/fMax*100);return o;},{}),
+              signalSnapshot:(function(){var snap={};finalTop5.forEach(function(x){snap[x[0]]=finalResult.snapshots[x[0]]||{};});return snap;})(),
+              weightsAtTime:Object.assign({},finalResult.weights),
+              status:'pending',outcome:null,actualDate:null,actualCodes:null,auto:true
+            });
+            saveDB(db);
+          }
+        }
+        onDone(resolvedCount);
+        return;
+      }
+
+      // Process one step
       db=loadDB();
       var trainEntries=entries.slice(0,i+1);
       var nextEntry=entries[i+1];
-
       var currentPreds=shopPreds(letter);
       var result=buildCombinedScore(trainEntries,currentPreds,letter);
       var top5=Object.entries(result.scores).sort(function(a,b){return b[1]-a[1];}).slice(0,5);
-      if(!top5.length) continue;
 
-      var predDate=trainEntries[trainEntries.length-1].date;
-
-      var outcome={};
-      top5.forEach(function(x){
-        outcome[x[0]]=nextEntry.codes.indexOf(x[0])>-1?'hit':'miss';
-      });
-      var slotsCovered=nextEntry.codes.filter(function(c){return top5.map(function(x){return x[0];}).indexOf(c)>-1;}).length;
-      var status=resolveStatus(outcome);
-
-      var top5RebuildMax=top5.length?top5[0][1]:0.001;
-      var pred={
-        id:i*100000+Date.now()%100000,
-        createdDate:predDate,
-        targetDate:null,
-        predictedCodes:top5.map(function(x){return x[0];}),
-        scores:top5.reduce(function(o,x){o[x[0]]=Math.round(x[1]/top5RebuildMax*100);return o;},{}),
-        signalSnapshot:(function(){
-          var snap={};
-          top5.forEach(function(x){snap[x[0]]=result.snapshots[x[0]]||{};});
-          return snap;
-        })(),
-        weightsAtTime:Object.assign({},result.weights),
-        status:status,
-        outcome:outcome,
-        slotsCovered:slotsCovered,
-        totalSlots:nextEntry.codes.length,
-        actualDate:nextEntry.date,
-        actualCodes:Array.from(new Set(nextEntry.codes)).filter(function(c){return outcome[c]==='hit';}),
-        auto:true
-      };
-
-      // ── Retroactively compute promoted and watchout codes ──
-      // Recompute what patterns and watchouts would have been at prediction time
-      try{
-        var top5Codes=top5.map(function(x){return x[0];});
-        var patterns=buildEmergentPatterns(trainEntries,currentPreds);
-        var appliedResult=applyEmergentToTop3(top5.slice(),patterns,result.scores);
-        pred.promotedCodes=(appliedResult.promotions||[]).map(function(p){return p.promoted;});
-        pred.patternRules=(appliedResult.promotions||[]).map(function(p){
-          return p.pattern&&p.pattern.rule?p.pattern.rule.slice(0,40):'pattern';
-        });
-
-        var watchoutsAtTime=buildWatchouts(trainEntries,currentPreds,result,top5Codes,letter);
-        pred.watchoutCodes=watchoutsAtTime.map(function(w){return w.code;});
-        pred.regimeAtTime=result.regime?{shifting:result.regime.shifting,note:result.regime.note||''}:null;
-
-        // Compute triggeredOutcome — did promoted/watchout codes actually arrive?
-        var allTriggered=Array.from(new Set(
-          pred.promotedCodes.concat(pred.watchoutCodes)
-            .filter(function(c){return top5Codes.indexOf(c)===-1;})
-        ));
-        // Use full result.scores (all codes) not pred.scores (top-5 only)
-        // Normalise full scores to 0-100 for stable display
-        var fullScores=result.scores||{};
-        var fullMaxS=Math.max.apply(null,Object.values(fullScores).concat([0.001]));
-        var triggeredOutcome={};
-        allTriggered.forEach(function(c){
-          triggeredOutcome[c]={
-            appeared:nextEntry.codes.indexOf(c)>-1,
-            type:pred.promotedCodes.indexOf(c)>-1?'promoted':'watchout',
-            scorePct:fullScores[c]?Math.round(fullScores[c]/fullMaxS*100):null
-          };
-        });
-        pred.triggeredOutcome=triggeredOutcome;
-      }catch(e){
-        pred.promotedCodes=[];
-        pred.watchoutCodes=[];
-        pred.triggeredOutcome={};
-      }
-
-      db.shops[letter].predictions.push(pred);
-      // Save after each push so updateWeights can loadDB() safely
-      saveDB(db);
-      resolvedCount++;
-
-      // Now update weights via observation window — loadDB() inside will see the saved prediction
-      processObservationWindow(letter, pred);
-    }
-
-    // Reload and add fresh pending prediction
-    db=loadDB();
-    var allEntries=(db.shops[letter].entries||[]).slice().sort(function(a,b){return a.date.localeCompare(b.date);});
-    if(allEntries.length>=3){
-      var allPreds=shopPreds(letter);
-      var finalResult=buildCombinedScore(allEntries,allPreds,letter);
-      var finalTop5=Object.entries(finalResult.scores).sort(function(a,b){return b[1]-a[1];}).slice(0,5);
-      if(finalTop5.length){
-        db.shops[letter].predictions.push({
-          id:Date.now()+shops.indexOf(letter),
-          createdDate:allEntries[allEntries.length-1].date,
+      if(top5.length){
+        var top5Max=top5[0][1];
+        var outcome={};
+        top5.forEach(function(x){outcome[x[0]]=nextEntry.codes.indexOf(x[0])>-1?'hit':'miss';});
+        var slotsCovered=nextEntry.codes.filter(function(c){return top5.some(function(x){return x[0]===c;});}).length;
+        var pred={
+          id:i*100000+Date.now()%100000,
+          createdDate:trainEntries[trainEntries.length-1].date,
           targetDate:null,
-          predictedCodes:finalTop5.map(function(x){return x[0];}),
-          scores:finalTop5.reduce(function(o,x){o[x[0]]=x[1];return o;},{}),
-          signalSnapshot:(function(){var snap={};finalTop5.forEach(function(x){snap[x[0]]=finalResult.snapshots[x[0]]||{};});return snap;})(),
-          weightsAtTime:Object.assign({},finalResult.weights),
-          status:'pending',outcome:null,actualDate:null,actualCodes:null,auto:true
-        });
+          predictedCodes:top5.map(function(x){return x[0];}),
+          scores:top5.reduce(function(o,x){o[x[0]]=Math.round(x[1]/top5Max*100);return o;},{}),
+          signalSnapshot:(function(){var snap={};top5.forEach(function(x){snap[x[0]]=result.snapshots[x[0]]||{};});return snap;})(),
+          weightsAtTime:Object.assign({},result.weights),
+          status:resolveStatus(outcome),
+          outcome:outcome,
+          slotsCovered:slotsCovered,
+          totalSlots:nextEntry.codes.length,
+          actualDate:nextEntry.date,
+          actualCodes:Array.from(new Set(nextEntry.codes)).filter(function(c){return outcome[c]==='hit';}),
+          auto:true
+        };
+        try{
+          var top5Codes=top5.map(function(x){return x[0];});
+          var patterns=buildEmergentPatterns(trainEntries,currentPreds);
+          var applied=applyEmergentToTop3(top5.slice(),patterns,result.scores);
+          pred.promotedCodes=(applied.promotions||[]).map(function(p){return p.promoted;});
+          pred.patternRules=(applied.promotions||[]).map(function(p){return p.pattern&&p.pattern.rule?p.pattern.rule.slice(0,40):'pattern';});
+          var wo=buildWatchouts(trainEntries,currentPreds,result,top5Codes,letter);
+          pred.watchoutCodes=wo.map(function(w){return w.code;});
+          pred.regimeAtTime=result.regime?{shifting:result.regime.shifting,note:result.regime.note||''}:null;
+          var fullScores=result.scores||{};
+          var fullMaxS=Math.max.apply(null,Object.values(fullScores).concat([0.001]));
+          var triggeredOutcome={};
+          Array.from(new Set(pred.promotedCodes.concat(pred.watchoutCodes).filter(function(c){return top5Codes.indexOf(c)===-1;}))).forEach(function(c){
+            triggeredOutcome[c]={appeared:nextEntry.codes.indexOf(c)>-1,type:pred.promotedCodes.indexOf(c)>-1?'promoted':'watchout',scorePct:fullScores[c]?Math.round(fullScores[c]/fullMaxS*100):null};
+          });
+          pred.triggeredOutcome=triggeredOutcome;
+        }catch(e){pred.promotedCodes=[];pred.watchoutCodes=[];pred.triggeredOutcome={};}
+
+        db.shops[letter].predictions.push(pred);
         saveDB(db);
+        processObservationWindow(letter,pred);
+        resolvedCount++;
       }
+
+      i++;
+      showProgress(letter, i-2, total);
+      // Yield to event loop between steps — prevents iOS from terminating
+      setTimeout(processStep, 0);
     }
 
-    if(resolvedCount>0){ totalResolved+=resolvedCount; totalShops++; }
-  });
+    showProgress(letter, 0, total);
+    setTimeout(processStep, 0);
+  }
 
-  db=loadDB();
-  renderShopPills();
-  updateAllBanners();
+  function nextShop(){
+    if(shopIdx>=shops.length){
+      // All done
+      db=loadDB();
+      renderShopPills();
+      renderRebuildPills();
+      updateAllBanners();
+      shops.forEach(function(letter){ learnAndStoreThresholds(letter); });
+      if(navigator.vibrate) navigator.vibrate([30,20,30,20,80]);
+      var msg=totalShops>0
+        ?'✅ Rebuilt '+totalResolved+' predictions across '+totalShops+' shop'+(totalShops>1?'s':'')+'. Track and Score updated.'
+        :'No shops had enough entries (need 4+).';
+      var cls=totalShops>0?'alert-success':'alert-warn';
+      if(rebuildEl) rebuildEl.innerHTML='<div class="alert '+cls+'">'+msg+'</div>';
+      if(curPanel()==='track')      renderTrack();
+      if(curPanel()==='confidence') renderConfidence();
+      return;
+    }
+    var letter=shops[shopIdx++];
+    rebuildShop(letter, function(count){
+      if(count>0){ totalResolved+=count; totalShops++; }
+      setTimeout(nextShop, 0);
+    });
+  }
 
-  var msg=totalShops>0
-    ? '✅ Rebuilt '+totalResolved+' resolved predictions across '+totalShops+' shop'+(totalShops>1?'s':'')+'. Track and Score now show performance history.'
-    : 'No shops had enough entries to rebuild (need 4+).';
-  var cls=totalShops>0?'alert-success':'alert-warn';
-  document.getElementById('rebuild-result').innerHTML='<div class="alert '+cls+'">'+msg+'</div>';
-
-  // Learn thresholds from full prediction history for all shops
-  shops.forEach(function(letter){ learnAndStoreThresholds(letter); });
-
-  // Completion haptic — double pulse to confirm done
-  if(navigator.vibrate) navigator.vibrate([30,20,30,20,80]);
-
-  if(curPanel()==='track')      renderTrack();
-  if(curPanel()==='confidence') renderConfidence();
-
-  },50); // end setTimeout
+  setTimeout(nextShop, 50);
 }
 
 function exportFullBackup(){ saveToiCloud(); } // alias
