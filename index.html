@@ -10637,6 +10637,15 @@ function rebuildPredictions(onlyShop){
     var entries=(s.entries||[]).slice().sort(function(a,b){return a.date.localeCompare(b.date);});
     if(entries.length<4){ onDone(0); return; }
 
+    // Preserve live pending prediction if it was generated from the latest entry.
+    // Rebuild replays historical steps — but if the user already had a real live
+    // prediction (e.g. 4 hits yesterday), we keep it rather than overwriting with
+    // a rebuilt version that uses different weights and produces different codes.
+    var lastEntryDate=entries[entries.length-1].date;
+    var existing=(s.predictions||[]).filter(function(p){return p.status==='pending';});
+    var livePendingToKeep=existing.length>0&&existing[0].createdDate>=lastEntryDate
+      ?existing[0]:null;
+
     // Clear auto predictions and reset windows
     db.shops[letter].predictions=(s.predictions||[]).filter(function(p){return !p.auto;});
     db.shops[letter].obsWindow={};
@@ -10653,33 +10662,42 @@ function rebuildPredictions(onlyShop){
         db=loadDB();
         var allEntries=(db.shops[letter].entries||[]).slice().sort(function(a,b){return a.date.localeCompare(b.date);});
         if(allEntries.length>=3){
-          var allPreds=shopPreds(letter);
-          var finalResult=buildCombinedScore(allEntries,allPreds,letter);
-          var finalTop5=Object.entries(finalResult.scores).sort(function(a,b){return b[1]-a[1];}).slice(0,5);
-          if(finalTop5.length){
-            var fMax=finalTop5[0][1];
-            var fPatterns=buildEmergentPatterns(allEntries,allPreds);
-            var fApplied=applyEmergentToTop3(finalTop5.slice(),fPatterns,finalResult.scores);
-            var fWatchouts=buildWatchouts(allEntries,allPreds,finalResult,finalTop5.map(function(x){return x[0];}),letter);
-            var fFullMax=Math.max.apply(null,Object.values(finalResult.scores).concat([0.001]));
-            var fNorm={};
-            Object.keys(finalResult.scores).forEach(function(c){fNorm[c]=Math.round(finalResult.scores[c]/fFullMax*100);});
-            db.shops[letter].lastFullScores=fNorm;
-            db.shops[letter].predictions.push({
-              id:Date.now(),
-              createdDate:allEntries[allEntries.length-1].date,
-              targetDate:null,
-              predictedCodes:finalTop5.map(function(x){return x[0];}),
-              promotedCodes:(fApplied.promotions||[]).map(function(p){return p.promoted;}),
-              patternRules:(fApplied.promotions||[]).map(function(p){return p.pattern&&p.pattern.rule?p.pattern.rule.slice(0,40):'pattern';}),
-              watchoutCodes:fWatchouts.map(function(w){return w.code;}),
-              regimeAtTime:finalResult.regime?{shifting:finalResult.regime.shifting,note:finalResult.regime.note||''}:null,
-              scores:finalTop5.reduce(function(o,x){o[x[0]]=Math.round(x[1]/fMax*100);return o;},{}),
-              signalSnapshot:(function(){var snap={};finalTop5.forEach(function(x){snap[x[0]]=finalResult.snapshots[x[0]]||{};});return snap;})(),
-              weightsAtTime:Object.assign({},finalResult.weights),
-              status:'pending',outcome:null,actualDate:null,actualCodes:null,auto:true
-            });
+          if(livePendingToKeep){
+            // Restore the original live pending prediction — it was made from real
+            // live data and should not be overwritten by a rebuilt version that uses
+            // different weights and would show different codes/scores.
+            db.shops[letter].predictions.push(livePendingToKeep);
             saveDB(db);
+          } else {
+            // No live prediction to preserve — generate a fresh one from rebuild
+            var allPreds=shopPreds(letter);
+            var finalResult=buildCombinedScore(allEntries,allPreds,letter);
+            var finalTop5=Object.entries(finalResult.scores).sort(function(a,b){return b[1]-a[1];}).slice(0,5);
+            if(finalTop5.length){
+              var fMax=finalTop5[0][1];
+              var fPatterns=buildEmergentPatterns(allEntries,allPreds);
+              var fApplied=applyEmergentToTop3(finalTop5.slice(),fPatterns,finalResult.scores);
+              var fWatchouts=buildWatchouts(allEntries,allPreds,finalResult,finalTop5.map(function(x){return x[0];}),letter);
+              var fFullMax=Math.max.apply(null,Object.values(finalResult.scores).concat([0.001]));
+              var fNorm={};
+              Object.keys(finalResult.scores).forEach(function(c){fNorm[c]=Math.round(finalResult.scores[c]/fFullMax*100);});
+              db.shops[letter].lastFullScores=fNorm;
+              db.shops[letter].predictions.push({
+                id:Date.now(),
+                createdDate:allEntries[allEntries.length-1].date,
+                targetDate:null,
+                predictedCodes:finalTop5.map(function(x){return x[0];}),
+                promotedCodes:(fApplied.promotions||[]).map(function(p){return p.promoted;}),
+                patternRules:(fApplied.promotions||[]).map(function(p){return p.pattern&&p.pattern.rule?p.pattern.rule.slice(0,40):'pattern';}),
+                watchoutCodes:fWatchouts.map(function(w){return w.code;}),
+                regimeAtTime:finalResult.regime?{shifting:finalResult.regime.shifting,note:finalResult.regime.note||''}:null,
+                scores:finalTop5.reduce(function(o,x){o[x[0]]=Math.round(x[1]/fMax*100);return o;},{}),
+                signalSnapshot:(function(){var snap={};finalTop5.forEach(function(x){snap[x[0]]=finalResult.snapshots[x[0]]||{};});return snap;})(),
+                weightsAtTime:Object.assign({},finalResult.weights),
+                status:'pending',outcome:null,actualDate:null,actualCodes:null,auto:true
+              });
+              saveDB(db);
+            }
           }
         }
         onDone(resolvedCount);
