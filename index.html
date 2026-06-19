@@ -837,14 +837,14 @@ label{display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bot
     </div>
 
     <div class="card" style="border-color:var(--green)">
-      <div class="card-title" style="color:var(--green)">🧬 OPTIMIZE WEIGHTS — Maximize hits</div>
+      <div class="card-title" style="color:var(--green)">🧬 LEARN FROM RECENT HITS</div>
       <p style="font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:10px">
-        Backtests all signal weight combinations against your full history and finds the weights that produce the most hits. Runs hill-climbing optimization — each signal nudged ±10%, keeping improvements. Takes 5–15 seconds.
+        Measures which signals actually predicted hits in recent refills — then boosts those signals and reduces noise. Recency-weighted: last 5 predictions count most. Works even with low shop confidence.
       </p>
       <div id="optimize-status" style="margin-bottom:8px"></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <button class="btn btn-primary" onclick="optimizeWeights()">🧬 Optimize for Max Hits</button>
-        <button class="btn btn-secondary" onclick="resetToDefaultWeights()">↺ Reset to Default</button>
+        <button class="btn btn-primary" onclick="optimizeWeights()">🧬 Learn from Recent Hits</button>
+        <button class="btn btn-secondary" onclick="resetToCurrentWeights()">↩ Reset to Current Model</button>
       </div>
       <div id="optimize-result" style="margin-top:10px"></div>
     </div>
@@ -1419,143 +1419,130 @@ actualCodes:null,
 auto:true
 });
 saveDB(db);
+setTimeout(function(){ runBackgroundLearner(letter); }, 0);
 }
-function autoResolve(letter, actualDate, actualCodes){
+function runBackgroundLearner(letter){
+if(!letter) return;
 db=loadDB();
-var changed=false;
-var worstStatus='hit';
-var resolvedPreds=[];
-var diagnostics=[];
 var entries=shopEntries(letter);
-var avgQtyMap=buildAvgQty(entries);
-shopPreds(letter).forEach(function(pred){
-if(pred.status!=='pending') return;
-var shouldResolve=pred.auto
-? actualDate>pred.createdDate
-: (pred.targetDate ? actualDate>=pred.targetDate : true);
-if(!shouldResolve) return;
-var outcome={};
-pred.predictedCodes.forEach(function(c){
-var actualCount=actualCodes.filter(function(x){return x===c;}).length;
-if(actualCount===0){
-outcome[c]='miss';
-} else {
-var avg=avgQtyMap[c]||1;
-outcome[c]=actualCount>=Math.round(avg)?'hit':'partial';
+var preds=shopPreds(letter);
+var resolved=preds.filter(function(p){
+  return p.status!=='pending'&&p.outcome&&p.signalSnapshot;
+});
+if(resolved.length<3) return;
+// Build recency-weighted signal lifts
+var HALF_LIFE=5;
+var sigLift={},sigCount={};
+SIGNAL_KEYS.forEach(function(k){sigLift[k]=0;sigCount[k]=0;});
+var n=resolved.length;
+resolved.forEach(function(p,idx){
+  var age=n-1-idx;
+  var rw=Math.pow(0.5,age/HALF_LIFE);
+  p.predictedCodes.forEach(function(c){
+    var isHit=p.outcome[c]==='hit'?1:0;
+    var snap=p.signalSnapshot&&p.signalSnapshot[c];
+    if(!snap) return;
+    SIGNAL_KEYS.forEach(function(k){
+      var sv=snap[k]||0;
+      if(sv>0){
+        sigLift[k]+=(isHit-0.5)*(sv-0.5)*4*rw;
+        sigCount[k]+=rw;
+      }
+    });
+  });
+});
+// Build candidate learned weights
+var currentW=getWeights(letter);
+var learnedW=Object.assign({},currentW);
+SIGNAL_KEYS.forEach(function(k){
+  if(sigCount[k]<0.5) return;
+  var normLift=Math.max(-1,Math.min(1,sigLift[k]/sigCount[k]));
+  var evidenceScale=Math.min(1,sigCount[k]/3);
+  learnedW[k]=Math.max(0.02,Math.min(0.45,(currentW[k]||DEFAULT_WEIGHTS[k])+normLift*0.35*evidenceScale));
+});
+learnedW=normaliseWeights(learnedW);
+// Score both models against last N resolved predictions
+// Only alert if learned weights would have produced MORE hits
+var TEST_N=Math.min(8,resolved.length);
+var testPreds=resolved.slice(-TEST_N);
+var sorted=entries.slice().sort(function(a,b){return a.date.localeCompare(b.date);});
+function scoreWeights(w,testPredictions){
+  var totalHits=0;
+  testPredictions.forEach(function(p){
+    var trainEntries=sorted.filter(function(e){return e.date<p.createdDate;});
+    if(trainEntries.length<3) return;
+    // Temporarily score with these weights
+    var freq2=buildFreqMap(trainEntries);
+    var rec2=buildWeightedScore(trainEntries);
+    var str2=buildStreaks(trainEntries);
+    var cooc2=buildCooccurrence(trainEntries);
+    var cyc2=buildCycleScore(trainEntries);
+    var mom2=buildMomentumScore(trainEntries).scores||{};
+    var ovd2=buildOverdueScore(trainEntries);
+    var int2=buildIntervalRegularity(trainEntries);
+    var qd2=buildQtyDominance(trainEntries);
+    var qs2=buildQtyStreak(trainEntries);
+    var allCodes=Array.from(new Set(trainEntries.reduce(function(a,e){return a.concat(e.codes);},[]) ));
+    var scored={};
+    allCodes.forEach(function(c){
+      scored[c]=
+        (freq2[c]||0)*w.freq+
+        (rec2[c]||0)*w.recency+
+        (str2[c]||0)*w.streak+
+        (cooc2[c]||0)*w.cooccur+
+        (cyc2[c]||0)*w.cycle+
+        (mom2[c]||0)*w.momentum+
+        (ovd2[c]||0)*w.overdue+
+        (int2[c]||0)*w.interval+
+        (qd2[c]||0)*w.qtydom+
+        (qs2[c]||0)*w.qtystreak;
+    });
+    var top5=Object.entries(scored).sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];});
+    top5.forEach(function(c){
+      if(p.actualCodes&&p.actualCodes.indexOf(c)>-1) totalHits++;
+    });
+  });
+  return totalHits;
 }
-});
-pred.slotsCovered=actualCodes.filter(function(c){return pred.predictedCodes.indexOf(c)>-1;}).length;
-pred.totalSlots=actualCodes.length;
-pred.status=resolveStatus(outcome);
-pred.outcome=outcome;
-pred.actualDate=actualDate;
-pred.actualCodes=actualCodes;
-pred.liveResolved=true;
-var triggeredOutcome={};
-var allTriggered=Array.from(new Set(
-(pred.promotedCodes||[]).concat(pred.watchoutCodes||[])
-.filter(function(c){return pred.predictedCodes.indexOf(c)===-1;})
-));
-var fullSc=db.shops[letter]&&db.shops[letter].lastFullScores||{};
-allTriggered.forEach(function(c){
-triggeredOutcome[c]={
-appeared:actualCodes.indexOf(c)>-1,
-type:(pred.promotedCodes&&pred.promotedCodes.indexOf(c)>-1)?'promoted':'watchout',
-scorePct:fullSc[c]!=null?fullSc[c]:null
-};
-});
-pred.triggeredOutcome=triggeredOutcome;
-var missedCodes=pred.predictedCodes.filter(function(c){return outcome[c]==='miss';});
-var partialCodes=pred.predictedCodes.filter(function(c){return outcome[c]==='partial';});
-var hitCodes=pred.predictedCodes.filter(function(c){return outcome[c]==='hit';});
-var codeDiags=[];
-missedCodes.concat(partialCodes).forEach(function(c){
-var snap=pred.signalSnapshot&&pred.signalSnapshot[c]||{};
-var weights=pred.weightsAtTime||{};
-var contribs=SIGNAL_KEYS.map(function(k){
-return {key:k,contrib:(snap[k]||0)*(weights[k]||0)};
-}).sort(function(a,b){return b.contrib-a.contrib;});
-var topSig=contribs[0];
-var sigLabels={freq:'Frequency',recency:'Recency',streak:'Streak',
-bias:'Pred. accuracy',cooccur:'Co-occurrence',interval:'Interval',
-dow:'Day-of-week',cycle:'Cycle',overdue:'Overdue',
-qtydom:'Qty dominance',qtystreak:'Qty streak'};
-var allPreds=shopPreds(letter);
-var recentResolved=allPreds.filter(function(p){
-return p.status!=='pending'&&p.outcome&&p.predictedCodes.indexOf(c)>-1;
-});
-var consecMisses=0;
-for(var i=recentResolved.length-1;i>=0;i--){
-if(recentResolved[i].outcome[c]==='miss') consecMisses++;
-else break;
+var currentHits=scoreWeights(currentW,testPreds);
+var learnedHits=scoreWeights(learnedW,testPreds);
+// Only alert if learned model produces MORE hits — not just different
+var hitGain=learnedHits-currentHits;
+if(hitGain<=0){
+  db=loadDB();
+  if(db.shops[letter]) db.shops[letter].learnerAlert=null;
+  saveDB(db);
+  if(curPanel()==='dashboard'){var el=document.getElementById('learner-alert');if(el)el.style.display='none';}
+  return;
 }
-consecMisses++;
-var severity=consecMisses===1?'first':consecMisses===2?'second':consecMisses>=3?'repeated':'first';
-var implication=consecMisses===1
-?'Isolated miss — may be an outlier. Monitor next refill.'
-:consecMisses===2
-?'Second consecutive miss — '+( topSig?sigLabels[topSig.key]+' signal':'Leading signal')+' may be misleading for this code.'
-:'Repeated miss ('+consecMisses+'×) — code '+c+' is being over-predicted. '+(topSig?sigLabels[topSig.key]+' signal is counter-predictive.':'Model may need recalibration.');
-codeDiags.push({
-code:c,
-status:outcome[c],
-dominantSignal:topSig?topSig.key:null,
-dominantLabel:topSig?(sigLabels[topSig.key]||topSig.key):null,
-dominantContrib:topSig?topSig.contrib:0,
-consecMisses:consecMisses,
-severity:severity,
-implication:implication
-});
-});
-var changes=[];
-if(missedCodes.length){
-changes.push('Miss-streak penalty applied to: '+missedCodes.join(', '));
-changes.push('Weights nudged — signals that were high for missed codes penalised');
-}
-if(hitCodes.length){
-changes.push('Weight reinforcement for signals driving: '+hitCodes.join(', '));
-}
-var slotPct=pred.totalSlots>0?Math.round(pred.slotsCovered/pred.totalSlots*100):0;
-changes.push('Slot coverage this refill: '+pred.slotsCovered+'/'+pred.totalSlots+' ('+slotPct+'%)');
-diagnostics.push({
-pred:pred,
-hitCodes:hitCodes,
-missedCodes:missedCodes,
-partialCodes:partialCodes,
-codeDiags:codeDiags,
-changes:changes,
-slotCoverage:slotPct
-});
-resolvedPreds.push(pred);
-if(pred.status==='miss') worstStatus='miss';
-else if(pred.status==='partial'&&worstStatus!=='miss') worstStatus='partial';
-changed=true;
-});
-if(changed){
+// Build current and learned top-5 for display
+var currentResult=buildCombinedScore(sorted,preds,letter);
+var currentTop5=Object.entries(currentResult.scores).sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];});
+db=loadDB();
+var savedW=db.shops[letter].weights;
+db.shops[letter].weights=learnedW;
+var learnedResult=buildCombinedScore(sorted,preds,letter);
+db.shops[letter].weights=savedW;
 saveDB(db);
-renderShopPills();
-var obsResults=[];
-resolvedPreds.forEach(function(pred){
-var obsResult=processObservationWindow(letter, pred);
-obsResults.push(obsResult);
-});
-if(diagnostics.length&&obsResults.length){
-diagnostics[0].obsResult=obsResults[0];
-}
-if(worstStatus==='miss'||worstStatus==='partial'){
-triggerAutoBacktest(letter, worstStatus);
-}
-setTimeout(function(){ learnAndStoreThresholds(letter); }, 100);
-}
-return {
-hadPrediction:resolvedPreds.length>0,
-resolved:resolvedPreds,
-diagnostics:diagnostics,
-worstStatus:changed?worstStatus:null,
-backtest:changed&&(worstStatus==='miss'||worstStatus==='partial')
-?((loadDB().shops[letter]||{}).lastAutoBacktest||null)
-:null
+var learnedTop5=Object.entries(learnedResult.scores).sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];});
+var agree=currentTop5.filter(function(c){return learnedTop5.indexOf(c)>-1;}).length;
+var learnedOnly=learnedTop5.filter(function(c){return currentTop5.indexOf(c)===-1;});
+var currentOnly=currentTop5.filter(function(c){return learnedTop5.indexOf(c)===-1;});
+var sigChanges=SIGNAL_KEYS.map(function(k){
+  return {k:k,delta:learnedW[k]-(currentW[k]||DEFAULT_WEIGHTS[k]),lift:sigCount[k]>0?sigLift[k]/sigCount[k]:0};
+}).sort(function(a,b){return Math.abs(b.delta)-Math.abs(a.delta);});
+var topBoost=sigChanges.filter(function(s){return s.delta>0.02;}).slice(0,2);
+var topReduce=sigChanges.filter(function(s){return s.delta<-0.02;}).slice(0,2);
+db=loadDB();
+db.shops[letter].learnerAlert={
+  ts:Date.now(),agree:agree,
+  currentHits:currentHits,learnedHits:learnedHits,hitGain:hitGain,testN:TEST_N,
+  learnedTop5:learnedTop5,currentTop5:currentTop5,
+  learnedOnly:learnedOnly,currentOnly:currentOnly,
+  topBoost:topBoost,topReduce:topReduce,learnedW:learnedW
 };
+saveDB(db);
+if(curPanel()==='dashboard') renderLearnerAlert(letter);
 }
 function showRefillResultAlert(result, actualCodes, date){
 var old=document.getElementById('refill-result-alert');
@@ -7346,6 +7333,7 @@ if(el) el.innerHTML='<div class="alert alert-info">📥 File downloaded — move
 }
 function optimizeWeights(){
 if(!activeShop){showToast('Select a shop first');return;}
+snapshotCurrentWeights(activeShop);
 if(navigator.vibrate) navigator.vibrate([40,30,40]);
 var statusEl=document.getElementById('optimize-status');
 var resultEl=document.getElementById('optimize-result');
@@ -7353,124 +7341,128 @@ if(statusEl) statusEl.innerHTML='';
 if(resultEl) resultEl.innerHTML='';
 db=loadDB();
 var entries=shopEntries(activeShop);
+var preds=shopPreds(activeShop).filter(function(p){
+  return p.status!=='pending'&&p.outcome&&p.signalSnapshot&&p.predictedCodes;
+});
 if(entries.length<6){
-if(resultEl) resultEl.innerHTML='<div class="alert alert-warn">Need 6+ entries to optimize.</div>';
-return;
+  if(resultEl) resultEl.innerHTML='<div class="alert alert-warn">Need 6+ entries.</div>';
+  return;
 }
 var sorted=entries.slice().sort(function(a,b){return a.date.localeCompare(b.date);});
-function evalWeights(w){
-var totalHits=0,totalPreds=0;
-for(var i=2;i<sorted.length-1;i++){
-var trainE=sorted.slice(0,i+1);
-var nextE=sorted[i+1];
-var freq2=buildFreqMap(trainE);
-var rec2=buildWeightedScore(trainE);
-var str2=buildStreaks(trainE);
-var cooc2=buildCooccurrence(trainE);
-var cyc2=buildCycleScore(trainE);
-var mom2=buildMomentumScore(trainE).scores||{};
-var ovd2=buildOverdueScore(trainE);
-var int2=buildIntervalRegularity(trainE);
-var qd2=buildQtyDominance(trainE);
-var qs2=buildQtyStreak(trainE);
-var allCodes=Array.from(new Set(trainE.reduce(function(a,e){return a.concat(e.codes);},[]) ));
-var scored={};
-allCodes.forEach(function(c){
-scored[c]=
-(freq2[c]||0)*w.freq+
-(rec2[c]||0)*w.recency+
-(str2[c]||0)*w.streak+
-(cooc2[c]||0)*w.cooccur+
-(cyc2[c]||0)*w.cycle+
-(mom2[c]||0)*w.momentum+
-(ovd2[c]||0)*w.overdue+
-(int2[c]||0)*w.interval+
-(qd2[c]||0)*w.qtydom+
-(qs2[c]||0)*w.qtystreak;
-});
-var top5=Object.entries(scored).sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];});
-var hits=top5.filter(function(c){return nextE.codes.indexOf(c)>-1;}).length;
-totalHits+=hits; totalPreds+=top5.length;
-}
-return {hits:totalHits,preds:totalPreds,rate:totalPreds>0?totalHits/totalPreds:0};
-}
 var origW=getWeights(activeShop);
-var bestW=Object.assign({},origW);
-var STEP=0.10;
-var baseline=evalWeights(bestW);
-var bestHits=baseline.hits;
-var bestRate=baseline.rate;
-var pass=0,sigIdx=0,improved=false;
-var maxPasses=3;
-if(statusEl) statusEl.innerHTML='<div style="font-size:11px;color:var(--muted)">Baseline: <strong style="color:var(--accent)">'+bestHits+' hits</strong> ('+Math.round(bestRate*100)+'%) — optimizing…</div>';
-function showProg(){
-var tot=maxPasses*SIGNAL_KEYS.length;
-var done=pass*SIGNAL_KEYS.length+sigIdx;
-var pct=Math.round(done/tot*100);
-if(statusEl) statusEl.innerHTML='<div style="font-size:11px;color:var(--muted);margin-bottom:4px">'
-+'Pass '+(pass+1)+'/'+maxPasses+' · signal '+(sigIdx+1)+'/'+SIGNAL_KEYS.length
-+' · best: <strong style="color:var(--green)">'+bestHits+' hits</strong></div>'
-+'<div style="height:4px;background:var(--surface2);border-radius:2px;overflow:hidden">'
-+'<div style="width:'+pct+'%;height:100%;background:var(--green);border-radius:2px"></div>'
-+'</div>';
-}
-function step(){
-if(pass>=maxPasses||(pass>0&&!improved)){finish();return;}
-if(sigIdx>=SIGNAL_KEYS.length){
-pass++; sigIdx=0;
-if(!improved){finish();return;}
-improved=false;
-setTimeout(step,0); return;
-}
-var k=SIGNAL_KEYS[sigIdx];
-var orig=bestW[k]||DEFAULT_WEIGHTS[k]||0.08;
-var wUp=normaliseWeights(Object.assign({},bestW,{[k]:Math.min(0.50,orig+STEP)}));
-var upR=evalWeights(wUp);
-var wDn=normaliseWeights(Object.assign({},bestW,{[k]:Math.max(0.01,orig-STEP)}));
-var dnR=evalWeights(wDn);
-if(upR.hits>bestHits){bestHits=upR.hits;bestRate=upR.rate;bestW=Object.assign({},wUp);improved=true;}
-else if(dnR.hits>bestHits){bestHits=dnR.hits;bestRate=dnR.rate;bestW=Object.assign({},wDn);improved=true;}
-sigIdx++; showProg();
-setTimeout(step,0);
-}
-function finish(){
-db.shops[activeShop].weights=bestW;
+
+// ── Recency-weighted signal lift ──────────────────────────────
+// For each resolved prediction, measure how well each signal's value
+// correlated with a hit. Weight recent predictions more than old ones
+// (exponential decay — last 5 count most, old history fades).
+// This answers: "what's working NOW" not "what worked historically".
+var RECENCY_HALF_LIFE=5; // predictions — halves every 5 predictions back
+var sigLift={};    // weighted sum of signal×outcome for each signal
+var sigCount={};   // weighted count
+SIGNAL_KEYS.forEach(function(k){sigLift[k]=0;sigCount[k]=0;});
+
+var n=preds.length;
+preds.forEach(function(p,idx){
+  // Recency weight: most recent = 1.0, decays exponentially
+  var age=n-1-idx; // 0 = most recent
+  var recWeight=Math.pow(0.5, age/RECENCY_HALF_LIFE);
+
+  p.predictedCodes.forEach(function(c){
+    var isHit=p.outcome[c]==='hit'?1:0;
+    var snap=p.signalSnapshot&&p.signalSnapshot[c];
+    if(!snap) return;
+    SIGNAL_KEYS.forEach(function(k){
+      var sigVal=snap[k]||0;
+      if(sigVal>0){
+        // Lift = how much above/below 0.5 was signal, × hit/miss
+        // Positive: high signal + hit = this signal is predictive
+        // Negative: high signal + miss = this signal is misleading
+        var lift=(isHit-0.5)*(sigVal-0.5)*4;
+        sigLift[k]+=lift*recWeight;
+        sigCount[k]+=recWeight;
+      }
+    });
+  });
+});
+
+// ── Compute new weights from lift ────────────────────────────
+// Start from current learned weights, blend with lift evidence.
+// More recent evidence = stronger shift.
+// Minimum 2 weighted observations before trusting a lift value.
+var newW=Object.assign({},origW);
+var MIN_WEIGHT=0.02, MAX_WEIGHT=0.45;
+var LIFT_SCALE=0.35; // how strongly lift shifts weights
+SIGNAL_KEYS.forEach(function(k){
+  var effectiveCount=sigCount[k];
+  if(effectiveCount<0.5) return; // not enough evidence
+  var normLift=sigLift[k]/effectiveCount; // -1 to +1
+  normLift=Math.max(-1,Math.min(1,normLift));
+  // Scale lift by evidence strength (more observations = trust more)
+  var evidenceScale=Math.min(1, effectiveCount/3);
+  var shift=normLift*LIFT_SCALE*evidenceScale;
+  newW[k]=Math.max(MIN_WEIGHT, Math.min(MAX_WEIGHT, (origW[k]||DEFAULT_WEIGHTS[k])+shift));
+});
+newW=normaliseWeights(newW);
+
+// Apply and show results immediately (no async needed — pure calculation)
+db.shops[activeShop].weights=newW;
 saveDB(db);
 if(navigator.vibrate) navigator.vibrate([30,20,30,20,80]);
 if(statusEl) statusEl.innerHTML='';
-var gain=bestHits-baseline.hits;
-var gainPct=Math.round((bestRate-baseline.rate)*100);
+
+// ── What changed ─────────────────────────────────────────────
+var N_RECENT=Math.min(5, preds.length);
+var recentHits=0, recentTotal=0;
+preds.slice(-N_RECENT).forEach(function(p){
+  Object.values(p.outcome).forEach(function(v){recentTotal++;if(v==='hit')recentHits++;});
+});
+var recentRate=recentTotal>0?Math.round(recentHits/recentTotal*100):0;
+
 var changes=SIGNAL_KEYS.map(function(k){
-return {k:k,before:Math.round((origW[k]||DEFAULT_WEIGHTS[k])*100),after:Math.round((bestW[k]||DEFAULT_WEIGHTS[k])*100)};
-}).sort(function(a,b){return Math.abs(b.after-b.before)-Math.abs(a.after-a.before);});
-var changeHtml=changes.filter(function(c){return Math.abs(c.after-c.before)>=1;}).map(function(c){
-var delta=c.after-c.before;
-var col=delta>0?'var(--green)':'var(--red)';
-return '<div style="display:flex;align-items:center;gap:6px;padding:3px 0">'
-+'<div style="width:7px;height:7px;border-radius:50%;background:'+(SIGNAL_COLORS[c.k]||'var(--muted)')+';flex-shrink:0"></div>'
-+'<span style="font-size:11px;color:var(--muted);min-width:88px">'+(SIGNAL_NAMES[c.k]||c.k)+'</span>'
-+'<div style="flex:1;height:4px;background:var(--surface2);border-radius:2px;overflow:hidden">'
-+'<div style="width:'+c.after+'%;height:100%;background:'+(SIGNAL_COLORS[c.k]||'var(--accent)')+'"></div>'
-+'</div>'
-+'<span style="font-size:11px;font-family:var(--mono);color:'+col+';min-width:56px;text-align:right">'+(delta>0?'+':'')+delta+'% → '+c.after+'%</span>'
-+'</div>';
+  var before=origW[k]||DEFAULT_WEIGHTS[k];
+  var after=newW[k]||DEFAULT_WEIGHTS[k];
+  var lift=sigCount[k]>0?sigLift[k]/sigCount[k]:0;
+  return {k:k, before:Math.round(before*100), after:Math.round(after*100),
+          delta:Math.round((after-before)*100), lift:lift, count:sigCount[k]};
+}).sort(function(a,b){return Math.abs(b.delta)-Math.abs(a.delta);});
+
+var changeHtml=changes.filter(function(c){return Math.abs(c.delta)>=1;}).map(function(c){
+  var col=c.delta>0?'var(--green)':c.delta<0?'var(--red)':'var(--muted)';
+  var liftIcon=c.lift>0.1?'↑ predictive':c.lift<-0.1?'↓ noise':'→ neutral';
+  var liftCol=c.lift>0.1?'var(--green)':c.lift<-0.1?'var(--red)':'var(--muted)';
+  return '<div style="display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid var(--border)">'
+    +'<div style="width:7px;height:7px;border-radius:50%;background:'+(SIGNAL_COLORS[c.k]||'var(--muted)')+';flex-shrink:0"></div>'
+    +'<span style="font-size:11px;color:var(--muted);min-width:82px">'+(SIGNAL_NAMES[c.k]||c.k)+'</span>'
+    +'<span style="font-size:10px;color:'+liftCol+';min-width:80px">'+liftIcon+'</span>'
+    +'<div style="flex:1;height:4px;background:var(--surface2);border-radius:2px;overflow:hidden">'
+      +'<div style="width:'+c.after+'%;height:100%;background:'+(SIGNAL_COLORS[c.k]||'var(--accent)')+'"></div>'
+    +'</div>'
+    +'<span style="font-size:11px;font-family:var(--mono);color:'+col+';min-width:56px;text-align:right">'+(c.delta>0?'+':'')+c.delta+'%→'+c.after+'%</span>'
+    +'</div>';
 }).join('');
+
+// Unchanged signals
+var unchanged=changes.filter(function(c){return Math.abs(c.delta)<1;});
+
 if(resultEl) resultEl.innerHTML=
-'<div class="alert '+(gain>0?'alert-success':'alert-info')+'" style="margin-bottom:8px">'
-+(gain>0
-?'✅ <strong>+'+gain+' hits (+'+gainPct+'%)</strong> — '
-+baseline.hits+' → '+bestHits+' hits across '+( sorted.length-3)+' walk-forward steps'
-:'Already optimal. '+bestHits+' hits — no improvement with ±10% signal nudges.')
-+'</div>'
-+(changeHtml?'<div style="font-size:10px;font-weight:700;color:var(--muted);margin-bottom:5px;text-transform:uppercase;letter-spacing:.4px">What changed</div>'+changeHtml:'')
-+'<div style="font-size:11px;color:var(--muted);margin-top:8px">✅ Weights saved. Tap <strong>Rebuild</strong> to apply to predictions.</div>';
+  '<div class="alert alert-success" style="margin-bottom:8px">'
+  +'<strong>✅ Weights updated from recent performance</strong><br>'
+  +'Based on last '+N_RECENT+' predictions · '
+  +'Recent hit rate: <strong style="color:'+(recentRate>=50?'var(--green)':recentRate>=30?'var(--gold)':'var(--red)')+'">'+recentRate+'%</strong><br>'
+  +'<span style="font-size:11px;color:var(--muted)">Signals that predicted hits recently → boosted. Signals that predicted misses → reduced. Recency-weighted: last '+RECENCY_HALF_LIFE+' predictions count most.</span>'
+  +'</div>'
+  +(changeHtml
+    ?'<div style="font-size:10px;font-weight:700;color:var(--muted);margin-bottom:5px;text-transform:uppercase;letter-spacing:.4px">Signal weight changes ('+changes.filter(function(c){return Math.abs(c.delta)>=1;}).length+' signals moved)</div>'+changeHtml
+    :'')
+  +(unchanged.length?'<div style="font-size:10px;color:var(--muted);margin-top:6px">'+unchanged.length+' signals unchanged (insufficient recent evidence)</div>':'')
+  +'<div style="font-size:11px;color:var(--muted);margin-top:8px">Tap <strong>Rebuild</strong> to apply to predictions.</div>';
+
 renderWeightRestorePills();
-}
-setTimeout(step,50);
 }
 function restoreBestHitWeights(letter){
 letter=letter||activeShop;
 if(!letter){showToast('Select a shop first');return;}
+snapshotCurrentWeights(letter);
 db=loadDB();
 var preds=shopPreds(letter).filter(function(p){
 return p.status!=='pending'&&p.outcome&&p.weightsAtTime&&Object.keys(p.weightsAtTime).length>0;
@@ -7505,15 +7497,31 @@ document.getElementById('weight-restore-result').innerHTML=
 renderWeightRestorePills();
 showToast('Best-hit weights restored for '+letter);
 }
-function resetToDefaultWeights(){
-if(!activeShop){showToast('Select a shop first');return;}
-db=loadDB();
-db.shops[activeShop].weights=Object.assign({},DEFAULT_WEIGHTS);
-saveDB(db);
-document.getElementById('weight-restore-result').innerHTML='<div class="alert alert-info">Weights reset to default for '+activeShop+'.</div>';
-renderWeightRestorePills();
-showToast('Reset to default weights');
+function snapshotCurrentWeights(letter){
+  letter=letter||activeShop;
+  if(!letter) return;
+  db=loadDB();
+  var w=getWeights(letter);
+  db.shops[letter].preManualWeights=Object.assign({},w);
+  saveDB(db);
 }
+
+function resetToCurrentWeights(){
+  if(!activeShop){showToast('Select a shop first');return;}
+  db=loadDB();
+  var pre=db.shops[activeShop].preManualWeights;
+  if(!pre||!Object.keys(pre).length){
+    document.getElementById('optimize-result').innerHTML='<div class="alert alert-info">No manual changes detected — current weights are already the model\'s learned state.</div>';
+    return;
+  }
+  db.shops[activeShop].weights=Object.assign({},pre);
+  delete db.shops[activeShop].preManualWeights;
+  saveDB(db);
+  document.getElementById('optimize-result').innerHTML='<div class="alert alert-success">↩ Restored model\'s learned weights — the most recent state from gradient learning before any manual changes. Run Rebuild to apply.</div>';
+  renderWeightRestorePills();
+  showToast('Current model weights restored');
+}
+
 function renderWeightRestorePills(){
 var el=document.getElementById('weight-restore-pills');
 if(!el||!activeShop) return;
@@ -7547,6 +7555,7 @@ return '<button onclick="restoreWeightsFromPred(\''+p.id+'\')" '
 }
 function restoreWeightsFromPred(predId){
 if(!activeShop) return;
+snapshotCurrentWeights(activeShop);
 db=loadDB();
 var pred=shopPreds(activeShop).find(function(p){return String(p.id)===String(predId);});
 if(!pred||!pred.weightsAtTime){showToast('Prediction not found');return;}
@@ -7997,6 +8006,65 @@ function renderAnalytics(){
 }
 
 function renderGuide(){}
+
+function renderLearnerAlert(letter){
+letter=letter||activeShop;
+var el=document.getElementById('learner-alert');
+if(!el) return;
+db=loadDB();
+var a=db.shops[letter]&&db.shops[letter].learnerAlert;
+if(!a||!a.hitGain||a.hitGain<=0){el.style.display='none';return;}
+el.style.display='block';
+var boost=a.topBoost.map(function(s){return (SIGNAL_NAMES[s.k]||s.k)+' ↑';}).join(', ');
+var reduce=a.topReduce.map(function(s){return (SIGNAL_NAMES[s.k]||s.k)+' ↓';}).join(', ');
+el.innerHTML='<div style="background:rgba(62,207,142,.10);border:1px solid rgba(62,207,142,.35);border-radius:10px;padding:10px 12px;margin-bottom:8px">'
+  +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">'
+    +'<span style="font-size:16px">💡</span>'
+    +'<div>'
+      +'<div style="font-size:12px;font-weight:700;color:var(--green)">Learning detected +'+a.hitGain+' hit'+(a.hitGain>1?'s':'')+' improvement</div>'
+      +'<div style="font-size:10px;color:var(--muted)">Tested on last '+a.testN+' predictions: current '+a.currentHits+' hits → learned '+a.learnedHits+' hits</div>'
+    +'</div>'
+  +'</div>'
+  +(a.learnedOnly.length
+    ?'<div style="font-size:11px;color:var(--muted);margin-bottom:4px">New codes suggested: <span style="font-family:var(--mono);font-weight:700;color:var(--green)">'+a.learnedOnly.join(' ')+'</span>'
+      +(a.currentOnly.length?' · drops: <span style="font-family:var(--mono);color:var(--muted)">'+a.currentOnly.join(' ')+'</span>':'')
+    +'</div>'
+    :'')
+  +(boost||reduce
+    ?'<div style="font-size:10px;color:var(--muted);margin-bottom:8px">'
+      +(boost?'<span style="color:var(--green)">'+boost+'</span>':'')
+      +(boost&&reduce?' · ':'')
+      +(reduce?'<span style="color:var(--red)">'+reduce+'</span>':'')
+    +'</div>'
+    :'')
+  +'<div style="display:flex;gap:8px">'
+    +'<button class="btn btn-primary btn-small" onclick="applyLearnerWeights()">✅ Apply & Rebuild</button>'
+    +'<button class="btn btn-secondary btn-small" onclick="dismissLearnerAlert()">✕ Dismiss</button>'
+  +'</div>'
++'</div>';
+}
+function applyLearnerWeights(){
+if(!activeShop) return;
+db=loadDB();
+var a=db.shops[activeShop]&&db.shops[activeShop].learnerAlert;
+if(!a||!a.learnedW) return;
+snapshotCurrentWeights(activeShop);
+db.shops[activeShop].weights=a.learnedW;
+db.shops[activeShop].learnerAlert=null;
+saveDB(db);
+var el=document.getElementById('learner-alert');
+if(el) el.style.display='none';
+rebuildPredictions(activeShop);
+showToast('Learned weights applied — rebuilding '+activeShop);
+}
+function dismissLearnerAlert(){
+if(!activeShop) return;
+db=loadDB();
+if(db.shops[activeShop]) db.shops[activeShop].learnerAlert=null;
+saveDB(db);
+var el=document.getElementById('learner-alert');
+if(el) el.style.display='none';
+}
 </script>
 </body>
 </html>
