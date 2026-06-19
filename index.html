@@ -1072,10 +1072,13 @@ function shopGrad(c){ return shopData(c).gradAccum; }
 
 // ── NAVIGATION ────────────────────────────
 function showPanel(id){
+  var panelEl=document.getElementById('panel-'+id);
+  var navEl=document.getElementById('nav-'+id);
+  if(!panelEl||!navEl) return; // guard against invalid panel id
   Array.prototype.forEach.call(document.querySelectorAll('.panel'),function(p){p.classList.remove('active');});
   Array.prototype.forEach.call(document.querySelectorAll('.nav-btn'),function(b){b.classList.remove('active');});
-  document.getElementById('panel-'+id).classList.add('active');
-  document.getElementById('nav-'+id).classList.add('active');
+  panelEl.classList.add('active');
+  navEl.classList.add('active');
   // Show no-shop overlay only for panels that need a shop
   var needsShop = ['collect','archive','analytics','dashboard','track'].indexOf(id) > -1;
   var noShopMsg = document.getElementById('no-shop-msg');
@@ -6828,7 +6831,7 @@ function renderTrack(){
     resEl.innerHTML='<div style="background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.2);border-radius:8px;padding:10px">'
       +'<div style="font-size:12px;color:var(--gold);font-weight:700;margin-bottom:5px">No resolved predictions yet</div>'
       +'<div style="font-size:11px;color:var(--muted);margin-bottom:8px">If you entered refills one-by-one they resolve automatically. If you entered historical data in batch, run Rebuild.</div>'
-      +'<button class="btn btn-secondary btn-small" onclick="showPanel(\'data\');setTimeout(function(){rebuildPredictions();},100)">🔧 Rebuild now</button>'
+      +'<button class="btn btn-secondary btn-small" onclick="showPanel(\'storage\');setTimeout(function(){rebuildPredictions();},100)">🔧 Rebuild now</button>'
       +'</div>';
   } else {
     var last10 = resolved.slice().reverse().slice(0,10);
@@ -7441,7 +7444,7 @@ function renderAccuracySummary(resolved){
       +'<div style="font-size:12px;color:var(--muted);margin-bottom:10px;line-height:1.6">'
       +'Predictions are generated automatically when you save a refill entry. If you entered historical data in batch, run <strong>Rebuild</strong> to replay all entries and generate the full prediction history.'
       +'</div>'
-      +'<button class="btn btn-primary" style="font-size:12px;padding:7px 14px" onclick="showPanel(\'data\');setTimeout(function(){rebuildPredictions();},100)">🔧 Rebuild Predictions Now</button>'
+      +'<button class="btn btn-primary" style="font-size:12px;padding:7px 14px" onclick="showPanel(\'storage\');setTimeout(function(){rebuildPredictions();},100)">🔧 Rebuild Predictions Now</button>'
       +'</div>';
     return;
   }
