@@ -1465,6 +1465,13 @@ return resolveResult;
 }
 function autoSavePrediction(letter){
 db=loadDB();
+// Clear stale per-code lifts if signal version changed (signal scale/logic updated)
+Object.keys(db.shops||{}).forEach(function(s){
+  if(db.shops[s].codeSignalLiftsVersion!==SIGNAL_VERSION){
+    db.shops[s].codeSignalLifts={};
+    db.shops[s].codeSignalLiftsVersion=SIGNAL_VERSION;
+  }
+});
 var entries=shopEntries(letter);
 if(entries.length<3) return;
 var preds=shopPreds(letter);
@@ -1523,11 +1530,15 @@ resolved.forEach(function(p,idx){
   var age=n-1-idx;
   var rw=Math.pow(0.5,age/HALF_LIFE);
   // Predicted codes (hits and misses)
+  // Exclude 'bias' — it's already recency-weighted outcome history.
+  // Including it in lift would double-count outcomes (bias IS the hit signal).
+  var LIFT_EXCLUDE=['bias'];
   p.predictedCodes.forEach(function(c){
     var isHit=p.outcome[c]==='hit'?1:0;
     var snap=p.signalSnapshot&&p.signalSnapshot[c];
     if(!snap) return;
     SIGNAL_KEYS.forEach(function(k){
+      if(LIFT_EXCLUDE.indexOf(k)>-1) return;
       var sv=snap[k]||0;
       if(sv>0){
         sigLift[k]+=(isHit-0.5)*(sv-0.5)*4*rw;
@@ -1535,13 +1546,13 @@ resolved.forEach(function(p,idx){
       }
     });
   });
-  // GAP 3: Surprise codes — arrived but not predicted
-  // High signal + arrived = model should have predicted them → boost that signal
+  // Surprise codes — arrived but not predicted
   var sSnap=p.surpriseSnapshot||{};
   (p.surpriseCodes||[]).forEach(function(c){
     var snap=sSnap[c];
     if(!snap) return;
     SIGNAL_KEYS.forEach(function(k){
+      if(LIFT_EXCLUDE.indexOf(k)>-1) return;
       var sv=snap[k]||0;
       if(sv>0){
         sigLift[k]+=(0.5)*(sv-0.5)*4*rw*0.7;
@@ -4012,6 +4023,7 @@ qtystreak:0.06,
 momentum: 0.14
 };
 var SIGNAL_KEYS = ['freq','recency','streak','bias','cooccur','interval','dow','cycle','overdue','qtydom','qtystreak','momentum'];
+var SIGNAL_VERSION = '2'; // increment when signal scale/computation changes — clears stale codeSignalLifts
 var LEARNING_RATE = 0.03;
 var WEIGHT_MIN    = 0.02;
 var WEIGHT_MAX    = 0.50;
