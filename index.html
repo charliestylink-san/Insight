@@ -1465,7 +1465,7 @@ return resolveResult;
 }
 function autoSavePrediction(letter){
 db=loadDB();
-// Clear stale per-code lifts if signal version changed (signal scale/logic updated)
+// Clear stale per-code lifts if signal version changed
 Object.keys(db.shops||{}).forEach(function(s){
   if(db.shops[s].codeSignalLiftsVersion!==SIGNAL_VERSION){
     db.shops[s].codeSignalLifts={};
@@ -1480,34 +1480,47 @@ var scores=result.scores;
 var snapshots=result.snapshots;
 var top5=Object.entries(scores).sort(function(a,b){return b[1]-a[1];}).slice(0,5);
 if(!top5.length) return;
-var lastEntryDate = entries[entries.length-1].date;
+var lastEntryDate=entries[entries.length-1].date;
 var top5Max=top5.length?top5[0][1]:0.001;
 var fullMax=Math.max.apply(null,Object.values(scores).concat([0.001]));
-var normFullScores={};
-Object.keys(scores).forEach(function(c){normFullScores[c]=Math.round(scores[c]/fullMax*100);});
-db.shops[letter].lastFullScores=normFullScores;
+// Normalised scores (0-100) for all codes — frozen at prediction time
+// Rebuild NEVER recomputes these — this is the immutable model snapshot
+var frozenScores={};
+Object.keys(scores).forEach(function(c){
+  frozenScores[c]=Math.round(scores[c]/fullMax*100);
+});
+// All signal snapshots (not just top-5) — lets learner see what signals said
+// for codes that arrived as surprises
+var frozenSnapshots={};
+Object.keys(snapshots).forEach(function(c){frozenSnapshots[c]=snapshots[c];});
+// Top-5 frozen scores for display
+var top5Scores=top5.reduce(function(o,x){
+  o[x[0]]=Math.round(x[1]/top5Max*100);
+  return o;
+},{});
+db.shops[letter].lastFullScores=frozenScores;
 db.shops[letter].predictions=preds.filter(function(p){return p.status!=='pending';});
 db.shops[letter].predictions.push({
-id:Date.now(),
-createdDate:lastEntryDate,
-targetDate:null,
-predictedCodes:top5.map(function(x){return x[0];}),
-promotedCodes:(result.promotions||[]).map(function(p){return p.promoted;}),
-patternRules:(result.promotions||[]).map(function(p){return p.pattern&&p.pattern.rule?p.pattern.rule.slice(0,40):'pattern';}),
-watchoutCodes:(result.watchouts||[]).map(function(w){return w.code;}),
-regimeAtTime:result.regime?{shifting:result.regime.shifting,note:result.regime.note||''}:null,
-scores:top5.reduce(function(o,x){o[x[0]]=Math.round(x[1]/top5Max*100);return o;},{}),
-signalSnapshot:(function(){
-var snap={};
-top5.forEach(function(x){snap[x[0]]=snapshots[x[0]]||{};});
-return snap;
-})(),
-weightsAtTime:Object.assign({},result.weights),
-status:'pending',
-outcome:null,
-actualDate:null,
-actualCodes:null,
-auto:true
+  id:Date.now(),
+  createdDate:lastEntryDate,
+  targetDate:null,
+  modelVersion:SIGNAL_VERSION,            // which signal code made this prediction
+  predictedCodes:top5.map(function(x){return x[0];}),
+  promotedCodes:(result.promotions||[]).map(function(p){return p.promoted;}),
+  patternRules:(result.promotions||[]).map(function(p){
+    return p.pattern&&p.pattern.rule?p.pattern.rule.slice(0,40):'pattern';
+  }),
+  watchoutCodes:(result.watchouts||[]).map(function(w){return w.code;}),
+  regimeAtTime:result.regime?{shifting:result.regime.shifting,note:result.regime.note||''}:null,
+  scores:top5Scores,                      // top-5 display scores (normalised 0-100)
+  frozenScores:frozenScores,              // ALL codes scored — immutable model snapshot
+  frozenSnapshots:frozenSnapshots,        // ALL signal values — for learner analysis
+  weightsAtTime:Object.assign({},result.weights),
+  status:'pending',
+  outcome:null,
+  actualDate:null,
+  actualCodes:null,
+  auto:true
 });
 saveDB(db);
 setTimeout(function(){ runBackgroundLearner(letter); }, 0);
@@ -1518,7 +1531,7 @@ db=loadDB();
 var entries=shopEntries(letter);
 var preds=shopPreds(letter);
 var resolved=preds.filter(function(p){
-  return p.status!=='pending'&&p.outcome&&p.signalSnapshot;
+  return p.status!=='pending'&&p.outcome&&(p.frozenSnapshots||p.signalSnapshot);
 });
 if(resolved.length<3) return;
 // Build recency-weighted signal lifts
@@ -1535,7 +1548,8 @@ resolved.forEach(function(p,idx){
   var LIFT_EXCLUDE=['bias'];
   p.predictedCodes.forEach(function(c){
     var isHit=p.outcome[c]==='hit'?1:0;
-    var snap=p.signalSnapshot&&p.signalSnapshot[c];
+    // Prefer frozenSnapshots (has all codes) over signalSnapshot (top-5 only)
+    var snap=(p.frozenSnapshots&&p.frozenSnapshots[c])||(p.signalSnapshot&&p.signalSnapshot[c]);
     if(!snap) return;
     SIGNAL_KEYS.forEach(function(k){
       if(LIFT_EXCLUDE.indexOf(k)>-1) return;
@@ -1547,8 +1561,13 @@ resolved.forEach(function(p,idx){
     });
   });
   // Surprise codes — arrived but not predicted
-  var sSnap=p.surpriseSnapshot||{};
-  (p.surpriseCodes||[]).forEach(function(c){
+  // Use frozenSnapshots if available (all codes scored at prediction time)
+  var sSnap=p.frozenSnapshots||p.surpriseSnapshot||{};
+  // Surprise codes = arrived + not in predicted top-5
+  var surprises=p.surpriseCodes||(p.actualCodes||[]).filter(function(c){
+    return p.predictedCodes.indexOf(c)===-1;
+  });
+  surprises.forEach(function(c){
     var snap=sSnap[c];
     if(!snap) return;
     SIGNAL_KEYS.forEach(function(k){
@@ -1579,35 +1598,36 @@ var sorted=entries.slice().sort(function(a,b){return a.date.localeCompare(b.date
 function scoreWeights(w,testPredictions){
   var totalHits=0;
   testPredictions.forEach(function(p){
-    var trainEntries=sorted.filter(function(e){return e.date<p.createdDate;});
-    if(trainEntries.length<3) return;
-    // Temporarily score with these weights
-    var freq2=buildFreqMap(trainEntries);
-    var rec2=buildWeightedScore(trainEntries);
-    var str2=buildStreaks(trainEntries);
-    var cooc2=buildCooccurrence(trainEntries);
-    var cyc2=buildCycleScore(trainEntries);
-    var mom2=buildMomentumScore(trainEntries).scores||{};
-    var ovd2=buildOverdueScore(trainEntries);
-    var int2=buildIntervalRegularity(trainEntries);
-    var qd2=buildQtyDominance(trainEntries);
-    var qs2=buildQtyStreak(trainEntries);
-    var allCodes=Array.from(new Set(trainEntries.reduce(function(a,e){return a.concat(e.codes);},[]) ));
-    var scored={};
-    allCodes.forEach(function(c){
-      scored[c]=
-        (freq2[c]||0)*w.freq+
-        (rec2[c]||0)*w.recency+
-        (str2[c]||0)*w.streak+
-        (cooc2[c]||0)*w.cooccur+
-        (cyc2[c]||0)*w.cycle+
-        (mom2[c]||0)*w.momentum+
-        (ovd2[c]||0)*w.overdue+
-        (int2[c]||0)*w.interval+
-        (qd2[c]||0)*w.qtydom+
-        (qs2[c]||0)*w.qtystreak;
-    });
-    var top5=Object.entries(scored).sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];});
+    var top5;
+    if(p.frozenSnapshots&&Object.keys(p.frozenSnapshots).length){
+      // Fast path: re-score frozen signal values × candidate weights
+      // No need to recompute signals from entries — the snapshot is the ground truth
+      var scored={};
+      Object.keys(p.frozenSnapshots).forEach(function(c){
+        var snap=p.frozenSnapshots[c];
+        scored[c]=SIGNAL_KEYS.reduce(function(sum,k){
+          return sum+(snap[k]||0)*(w[k]||DEFAULT_WEIGHTS[k]);
+        },0);
+      });
+      top5=Object.entries(scored).sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];});
+    } else {
+      // Fallback: recompute from entry history (older predictions without frozenSnapshots)
+      var trainEntries=sorted.filter(function(e){return e.date<p.createdDate;});
+      if(trainEntries.length<3) return;
+      var freq2=buildFreqMap(trainEntries),rec2=buildWeightedScore(trainEntries);
+      var str2=buildStreaks(trainEntries),cooc2=buildCooccurrence(trainEntries);
+      var cyc2=buildCycleScore(trainEntries),mom2=buildMomentumScore(trainEntries).scores||{};
+      var ovd2=buildOverdueScore(trainEntries),int2=buildIntervalRegularity(trainEntries);
+      var qd2=buildQtyDominance(trainEntries),qs2=buildQtyStreak(trainEntries);
+      var allCodes=Array.from(new Set(trainEntries.reduce(function(a,e){return a.concat(e.codes);},[]) ));
+      var sc={};
+      allCodes.forEach(function(c){
+        sc[c]=(freq2[c]||0)*w.freq+(rec2[c]||0)*w.recency+(str2[c]||0)*w.streak+
+          (cooc2[c]||0)*w.cooccur+(cyc2[c]||0)*w.cycle+(mom2[c]||0)*w.momentum+
+          (ovd2[c]||0)*w.overdue+(int2[c]||0)*w.interval+(qd2[c]||0)*w.qtydom+(qs2[c]||0)*w.qtystreak;
+      });
+      top5=Object.entries(sc).sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];});
+    }
     top5.forEach(function(c){
       if(p.actualCodes&&p.actualCodes.indexOf(c)>-1) totalHits++;
     });
@@ -7798,6 +7818,18 @@ db=loadDB();
 var trainEntries=entries.slice(0,i+1);
 var nextEntry=entries[i+1];
 if(liveResolvedDates[nextEntry.date]){
+i++;
+showProgress(letter, i-2, total);
+setTimeout(processStep, 0);
+return;
+}
+// Skip if a live prediction with frozenScores exists for this training window
+// frozenScores = made by the live model, immutable — rebuild never overwrites
+var trainEndDate=trainEntries[trainEntries.length-1].date;
+var hasLiveSnapshot=shopPreds(letter).some(function(p){
+  return p.createdDate===trainEndDate&&p.frozenScores;
+});
+if(hasLiveSnapshot){
 i++;
 showProgress(letter, i-2, total);
 setTimeout(processStep, 0);
