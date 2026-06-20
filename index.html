@@ -2277,14 +2277,20 @@ function buildSignalConsensus(code, snap, weights, effectiveW){
 var yes=0,no=0,neutral=0;
 var yesSignals=[],noSignals=[];
 var w=effectiveW||weights||DEFAULT_WEIGHTS;
+var contributions=[];
 SIGNAL_KEYS.forEach(function(k){
 var val=snap[k]||0;
 var wt=w[k]||DEFAULT_WEIGHTS[k]||0;
-var weighted=val*wt;
-if(val>=0.6)      { yes++;   yesSignals.push(k);  }
-else if(val<=0.35){ no++;    noSignals.push(k);   }
-else              { neutral++;                      }
+var contrib=val*wt;
+contributions.push({k:k,val:val,wt:wt,contrib:contrib});
+if(val>=0.6)      { yes++; }
+else if(val<=0.35){ no++;  }
+else              { neutral++; }
 });
+// Sort by weighted contribution — top named signals are the ones actually driving the score
+var sorted=contributions.slice().sort(function(a,b){return b.contrib-a.contrib;});
+yesSignals=sorted.filter(function(s){return s.val>=0.6;}).map(function(s){return s.k;});
+noSignals=sorted.filter(function(s){return s.val<=0.35;}).map(function(s){return s.k;});
 var total=yes+no+neutral;
 var score=total>0?Math.round((yes-no*0.5)/total*100):50;
 score=Math.max(0,Math.min(100,score+50));
@@ -2620,7 +2626,10 @@ momVal    * w.momentum
 pts=Math.max(0,Math.min(100,pts));
 var grade=pts>=80?'A':pts>=65?'B':pts>=50?'C':pts>=35?'D':'N';
 var col  =pts>=80?'var(--green)':pts>=65?'var(--accent)':pts>=50?'var(--gold)':'var(--red)';
-breakdown.push({label:'Signals',    pts:Math.round(consVal*w.consensus*100),   max:Math.round(w.consensus*100),  detail:consensus.yes+'↑ '+consensus.no+'↓'});
+var topYes=consensus.yesSignals.slice(0,2).map(function(k){return SIGNAL_NAMES[k]||k;}).join(', ');
+var topNo=consensus.noSignals.slice(0,1).map(function(k){return SIGNAL_NAMES[k]||k;}).join(', ');
+var consDetail=topYes+(topNo?' · ↓'+topNo:'');
+breakdown.push({label:'Signals', pts:Math.round(consVal*w.consensus*100), max:Math.round(w.consensus*100), detail:consDetail||'no strong signals'});
 breakdown.push({label:'Threshold',  pts:Math.round(threshVal*w.threshold*100), max:Math.round(w.threshold*100),
 detail:thresh&&thresh.reliability!=='insufficient'
 ?(scorePct>=(thresh.thresholdPct||50)?'▲ above ('+thresh.hitRateAbove+'% hit)':'▼ below ('+(thresh.hitRateBelowThreshold||0)+'% hit)')
@@ -5212,8 +5221,14 @@ active:  ''
 }[stateInfo.state]||'';
 var snap2=bcsResult.snapshots[code]||{};
 var consensus=buildSignalConsensus(code,snap2,bcsResult.weights,bcsResult.weights);
-var consensusBadge='<span style="font-size:9px;padding:1px 5px;border-radius:6px;font-weight:700;'
-+'background:rgba(0,0,0,.2);color:'+consensus.col+'">'+consensus.yes+'↑ '+consensus.no+'↓</span>';
+// Show top-2 driving signal names, not raw counts
+var topDriving=consensus.yesSignals
+  .slice(0,2)
+  .map(function(k){return SIGNAL_NAMES[k]||k;})
+  .join(' · ');
+var consensusBadge=topDriving
+  ?'<span style="font-size:9px;padding:1px 6px;border-radius:6px;font-weight:700;background:rgba(0,0,0,.2);color:'+consensus.col+'">'+topDriving+'</span>'
+  :'<span style="font-size:9px;padding:1px 6px;border-radius:6px;background:rgba(0,0,0,.2);color:var(--muted)">mixed</span>';
 var storedThresh=getStoredThreshold(activeShop,code);
 var thresh=storedThresh||buildScoreThreshold(code,entries,preds);
 var threshNote='';
