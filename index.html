@@ -7571,65 +7571,64 @@ if(resultEl) resultEl.innerHTML='';
 db=loadDB();
 var entries=shopEntries(activeShop);
 var preds=shopPreds(activeShop).filter(function(p){
-  return p.status!=='pending'&&p.outcome&&p.signalSnapshot&&p.predictedCodes;
+  return p.status!=='pending'&&p.outcome&&p.predictedCodes&&
+         (p.frozenSnapshots||p.signalSnapshot);
 });
 if(entries.length<6){
   if(resultEl) resultEl.innerHTML='<div class="alert alert-warn">Need 6+ entries.</div>';
   return;
 }
-var sorted=entries.slice().sort(function(a,b){return a.date.localeCompare(b.date);});
 var origW=getWeights(activeShop);
-
-// ── Recency-weighted signal lift ──────────────────────────────
-// For each resolved prediction, measure how well each signal's value
-// correlated with a hit. Weight recent predictions more than old ones
-// (exponential decay — last 5 count most, old history fades).
-// This answers: "what's working NOW" not "what worked historically".
-var RECENCY_HALF_LIFE=5; // predictions — halves every 5 predictions back
-var sigLift={};    // weighted sum of signal×outcome for each signal
-var sigCount={};   // weighted count
+var RECENCY_HALF_LIFE=5;
+var LIFT_EXCLUDE=['bias']; // bias is outcome-derived — exclude to avoid double-counting
+var sigLift={},sigCount={};
 SIGNAL_KEYS.forEach(function(k){sigLift[k]=0;sigCount[k]=0;});
-
 var n=preds.length;
 preds.forEach(function(p,idx){
-  // Recency weight: most recent = 1.0, decays exponentially
-  var age=n-1-idx; // 0 = most recent
-  var recWeight=Math.pow(0.5, age/RECENCY_HALF_LIFE);
-
+  var age=n-1-idx;
+  var recWeight=Math.pow(0.5,age/RECENCY_HALF_LIFE);
+  // Prefer frozenSnapshots (all codes) over signalSnapshot (top-5 only)
+  var allSnaps=p.frozenSnapshots||p.signalSnapshot||{};
+  // Predicted codes — hit or miss
   p.predictedCodes.forEach(function(c){
     var isHit=p.outcome[c]==='hit'?1:0;
-    var snap=p.signalSnapshot&&p.signalSnapshot[c];
+    var snap=allSnaps[c];
     if(!snap) return;
     SIGNAL_KEYS.forEach(function(k){
-      var sigVal=snap[k]||0;
-      if(sigVal>0){
-        // Lift = how much above/below 0.5 was signal, × hit/miss
-        // Positive: high signal + hit = this signal is predictive
-        // Negative: high signal + miss = this signal is misleading
-        var lift=(isHit-0.5)*(sigVal-0.5)*4;
-        sigLift[k]+=lift*recWeight;
+      if(LIFT_EXCLUDE.indexOf(k)>-1) return;
+      var sv=snap[k]||0;
+      if(sv>0){
+        sigLift[k]+=(isHit-0.5)*(sv-0.5)*4*recWeight;
         sigCount[k]+=recWeight;
       }
     });
   });
+  // Surprise codes — arrived but not predicted (signal was there, model missed them)
+  var surprises=p.surpriseCodes||(p.actualCodes||[]).filter(function(c){
+    return p.predictedCodes.indexOf(c)===-1;
+  });
+  surprises.forEach(function(c){
+    var snap=allSnaps[c]||(p.surpriseSnapshot&&p.surpriseSnapshot[c]);
+    if(!snap) return;
+    SIGNAL_KEYS.forEach(function(k){
+      if(LIFT_EXCLUDE.indexOf(k)>-1) return;
+      var sv=snap[k]||0;
+      if(sv>0){
+        // Surprise: signal was high but code wasn't predicted → boost that signal
+        // Weighted 0.7× since model didn't act on it (less certain than confirmed pred)
+        sigLift[k]+=(0.5)*(sv-0.5)*4*recWeight*0.7;
+        sigCount[k]+=recWeight*0.7;
+      }
+    });
+  });
 });
-
-// ── Compute new weights from lift ────────────────────────────
-// Start from current learned weights, blend with lift evidence.
-// More recent evidence = stronger shift.
-// Minimum 2 weighted observations before trusting a lift value.
 var newW=Object.assign({},origW);
-var MIN_WEIGHT=0.02, MAX_WEIGHT=0.45;
-var LIFT_SCALE=0.35; // how strongly lift shifts weights
+var MIN_WEIGHT=0.02,MAX_WEIGHT=0.45,LIFT_SCALE=0.35;
 SIGNAL_KEYS.forEach(function(k){
-  var effectiveCount=sigCount[k];
-  if(effectiveCount<0.5) return; // not enough evidence
-  var normLift=sigLift[k]/effectiveCount; // -1 to +1
-  normLift=Math.max(-1,Math.min(1,normLift));
-  // Scale lift by evidence strength (more observations = trust more)
-  var evidenceScale=Math.min(1, effectiveCount/3);
-  var shift=normLift*LIFT_SCALE*evidenceScale;
-  newW[k]=Math.max(MIN_WEIGHT, Math.min(MAX_WEIGHT, (origW[k]||DEFAULT_WEIGHTS[k])+shift));
+  if(sigCount[k]<0.5) return;
+  var normLift=Math.max(-1,Math.min(1,sigLift[k]/sigCount[k]));
+  var evidenceScale=Math.min(1,sigCount[k]/3);
+  newW[k]=Math.max(MIN_WEIGHT,Math.min(MAX_WEIGHT,(origW[k]||DEFAULT_WEIGHTS[k])+normLift*LIFT_SCALE*evidenceScale));
 });
 newW=normaliseWeights(newW);
 
@@ -7698,18 +7697,26 @@ function snapshotCurrentWeights(letter){
 }
 
 function resetToCurrentWeights(){
-  if(!activeShop){showToast('Select a shop first');return;}
-  db=loadDB();
-  var pre=db.shops[activeShop].preManualWeights;
-  if(!pre||!Object.keys(pre).length){
-    document.getElementById('optimize-result').innerHTML='<div class="alert alert-info">No manual changes detected — current weights are already the model\'s learned state.</div>';
-    return;
+if(!activeShop){showToast('Select a shop first');return;}
+db=loadDB();
+var preds=shopPreds(activeShop);
+var lastLive=null;
+for(var i=preds.length-1;i>=0;i--){
+  if(preds[i].frozenScores&&preds[i].weightsAtTime&&Object.keys(preds[i].weightsAtTime).length){
+    lastLive=preds[i]; break;
   }
-  db.shops[activeShop].weights=Object.assign({},pre);
-  delete db.shops[activeShop].preManualWeights;
-  saveDB(db);
-  document.getElementById('optimize-result').innerHTML='<div class="alert alert-success">↩ Restored model\'s learned weights — the most recent state from gradient learning before any manual changes. Run Rebuild to apply.</div>';
-    showToast('Current model weights restored');
+}
+var restoreW=lastLive?lastLive.weightsAtTime:(db.shops[activeShop].preManualWeights||null);
+if(!restoreW||!Object.keys(restoreW).length){
+  document.getElementById('optimize-result').innerHTML='<div class="alert alert-info">No model snapshot found yet — enter a refill to generate one.</div>';
+  return;
+}
+db.shops[activeShop].weights=Object.assign({},restoreW);
+delete db.shops[activeShop].preManualWeights;
+saveDB(db);
+var src=lastLive?'weights from prediction on '+(lastLive.createdDate||'last entry'):'pre-manual snapshot';
+document.getElementById('optimize-result').innerHTML='<div class="alert alert-success">↩ Restored current model — '+src+'. Run Rebuild to apply.</div>';
+showToast('Current model weights restored');
 }
 
 
