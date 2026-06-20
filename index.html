@@ -618,6 +618,8 @@ label{display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bot
         </div>
         <!-- Refill confidence score -->
         <div id="refill-confidence-score" style="margin-bottom:10px;display:none"></div>
+        <!-- Background learner alert — only when learned model produces more hits -->
+        <div id="learner-alert" style="display:none;margin-bottom:8px"></div>
         <!-- Plain English summary -->
         <div id="plain-english-summary" style="font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:10px;padding:8px;background:var(--surface);border-radius:8px;display:none"></div>
         <div id="top5-evidence"></div>
@@ -849,17 +851,7 @@ label{display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bot
       <div id="optimize-result" style="margin-top:10px"></div>
     </div>
 
-    <div class="card">
-      <div class="card-title">⚖️ SIGNAL WEIGHTS — Restore from prediction</div>
-      <p style="font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:10px">
-        Restore signal weights from the prediction with the highest hit rate.
-      </p>
-      <div id="weight-restore-pills" style="margin-bottom:10px"></div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <button class="btn btn-secondary" onclick="restoreBestHitWeights()">🎯 Restore Best-Hit Weights</button>
-      </div>
-      <div id="weight-restore-result" style="margin-top:8px"></div>
-    </div>
+    
 
     <div class="card">
       <div class="card-title">🔧 REBUILD PREDICTIONS</div>
@@ -1106,7 +1098,6 @@ if(id==='confidence') renderConfidence();
 if(id==='guide')      renderGuide();
 if(id==='storage')    renderStoragePanel();
 if(id==='storage')    renderRebuildPills();
-if(id==='storage')    renderWeightRestorePills();
 if(id==='storage'){
 var os=document.getElementById('optimize-status');
 if(os&&!os.innerHTML) os.innerHTML='<div style="font-size:11px;color:var(--muted)">'+( activeShop?shopEntries(activeShop).length+' entries available for optimization.':'Select a shop.')+'</div>';
@@ -1368,6 +1359,99 @@ if(!resolveResult||!resolveResult.hadPrediction) showWhatNextCard(codes, date, n
 showBackupReminder();
 showToast('Saved to Shop '+activeShop);
 }
+function autoResolve(letter, actualDate, actualCodes){
+db=loadDB();
+var preds=shopPreds(letter);
+var entries=shopEntries(letter);
+var hadPrediction=false;
+var resolvedPreds=[];
+preds.filter(function(p){return p.status==='pending'&&actualDate>p.createdDate;}).forEach(function(p){
+var outcome={};
+var avgQty=buildAvgQty(entries);
+p.predictedCodes.forEach(function(c){
+var cnt=actualCodes.filter(function(x){return x===c;}).length;
+outcome[c]=cnt===0?'miss':cnt>=Math.round(avgQty[c]||1)?'hit':'partial';
+});
+p.slotsCovered=actualCodes.filter(function(c){return p.predictedCodes.indexOf(c)>-1;}).length;
+p.totalSlots=actualCodes.length;
+p.status=resolveStatus(outcome);
+p.outcome=outcome;
+p.actualDate=actualDate;
+p.actualCodes=Array.from(new Set(actualCodes));
+p.liveResolved=true;
+// ── GAP 2+3: Capture signal snapshot for SURPRISE codes ──
+// Surprise = arrived but not in top-5 prediction
+// These are the codes the model SHOULD have predicted.
+// Storing their signal values at prediction time lets the learner
+// compute: "signal X was HIGH for this code + it hit → signal X weight up"
+var surpriseCodes=actualCodes.filter(function(c){return p.predictedCodes.indexOf(c)===-1;});
+if(surpriseCodes.length&&entries.length>=3){
+var trainEntries=entries.filter(function(e){return e.date<=p.createdDate;});
+if(trainEntries.length>=3){
+var freq2=buildFreqMap(trainEntries);
+var rec2=buildWeightedScore(trainEntries);
+var str2=buildStreaks(trainEntries);
+var cooc2=buildCooccurrence(trainEntries);
+var cyc2=buildCycleScore(trainEntries);
+var mom2=buildMomentumScore(trainEntries).scores||{};
+var ovd2=buildOverdueScore(trainEntries);
+var int2=buildIntervalRegularity(trainEntries);
+var qd2=buildQtyDominance(trainEntries);
+var qs2=buildQtyStreak(trainEntries);
+var surpriseSnap={};
+surpriseCodes.forEach(function(c){
+surpriseSnap[c]={
+freq:freq2[c]||0,
+recency:rec2[c]||0,
+streak:str2[c]||0,
+cooccur:cooc2[c]||0,
+cycle:cyc2[c]||0,
+momentum:mom2[c]||0,
+overdue:ovd2[c]||0,
+interval:int2[c]||0,
+qtydom:qd2[c]||0,
+qtystreak:qs2[c]||0
+};
+});
+p.surpriseSnapshot=surpriseSnap;
+p.surpriseCodes=surpriseCodes;
+}}
+// ── Per-code weight lift: update code-level signal affinity ──
+// Blend per-code lift with shop-level weights (60/40 partial pooling)
+// so low-data codes stay close to shop average
+var codeLifts=db.shops[letter].codeSignalLifts||{};
+var allCodes=p.predictedCodes.concat(surpriseCodes||[]);
+allCodes.forEach(function(c){
+var isHit=actualCodes.indexOf(c)>-1?1:0;
+var snap=(c===p.predictedCodes[0]?p.signalSnapshot&&p.signalSnapshot[c]:p.surpriseSnapshot&&p.surpriseSnapshot&&p.surpriseSnapshot[c])||
+(p.signalSnapshot&&p.signalSnapshot[c])||
+(p.surpriseSnapshot&&p.surpriseSnapshot[c])||null;
+if(!snap) return;
+if(!codeLifts[c]) codeLifts[c]={counts:{},lifts:{}};
+SIGNAL_KEYS.forEach(function(k){
+var sv=snap[k]||0;
+if(sv>0){
+codeLifts[c].lifts[k]=(codeLifts[c].lifts[k]||0)+(isHit-0.5)*(sv-0.5)*4;
+codeLifts[c].counts[k]=(codeLifts[c].counts[k]||0)+1;
+}
+});
+});
+db.shops[letter].codeSignalLifts=codeLifts;
+// Triggered outcomes
+var allT=Array.from(new Set((p.promotedCodes||[]).concat(p.watchoutCodes||[]).filter(function(c){return p.predictedCodes.indexOf(c)===-1;})));
+var fullSc=db.shops[letter].lastFullScores||{};
+var tOut={};
+allT.forEach(function(c){tOut[c]={appeared:actualCodes.indexOf(c)>-1,type:(p.promotedCodes&&p.promotedCodes.indexOf(c)>-1)?'promoted':'watchout',scorePct:fullSc[c]!=null?fullSc[c]:null};});
+p.triggeredOutcome=tOut;
+hadPrediction=true;
+resolvedPreds.push(p);
+});
+if(hadPrediction){
+saveDB(db);
+setTimeout(function(){learnAndStoreThresholds(letter);},100);
+}
+return {hadPrediction:hadPrediction,resolved:resolvedPreds,worstStatus:resolvedPreds.length?resolvedPreds[0].status:null};
+}
 function addEntry(letter,date,codes,source){
 db=loadDB();
 var resolveResult=autoResolve(letter,date,codes);
@@ -1438,6 +1522,7 @@ var n=resolved.length;
 resolved.forEach(function(p,idx){
   var age=n-1-idx;
   var rw=Math.pow(0.5,age/HALF_LIFE);
+  // Predicted codes (hits and misses)
   p.predictedCodes.forEach(function(c){
     var isHit=p.outcome[c]==='hit'?1:0;
     var snap=p.signalSnapshot&&p.signalSnapshot[c];
@@ -1447,6 +1532,20 @@ resolved.forEach(function(p,idx){
       if(sv>0){
         sigLift[k]+=(isHit-0.5)*(sv-0.5)*4*rw;
         sigCount[k]+=rw;
+      }
+    });
+  });
+  // GAP 3: Surprise codes — arrived but not predicted
+  // High signal + arrived = model should have predicted them → boost that signal
+  var sSnap=p.surpriseSnapshot||{};
+  (p.surpriseCodes||[]).forEach(function(c){
+    var snap=sSnap[c];
+    if(!snap) return;
+    SIGNAL_KEYS.forEach(function(k){
+      var sv=snap[k]||0;
+      if(sv>0){
+        sigLift[k]+=(0.5)*(sv-0.5)*4*rw*0.7;
+        sigCount[k]+=rw*0.7;
       }
     });
   });
@@ -3565,8 +3664,11 @@ showToast('Entries cleared');
 });
 }
 function buildFreqMap(entries){
-var f={};
+var f={},n=entries.length;
+if(!n) return f;
 entries.forEach(function(e){e.codes.forEach(function(c){f[c]=(f[c]||0)+1;});});
+// Normalise to appearance rate (0–1) — independent of history length
+Object.keys(f).forEach(function(c){f[c]=f[c]/n;});
 return f;
 }
 function buildAppearanceRate(entries){
@@ -3632,24 +3734,38 @@ score[c] = Math.min(1, streak/4);
 return score;
 }
 function buildWeightedScore(entries){
+// Exponential decay recency — code last appearing 1 refill ago scores ~2× more than
+// code appearing 3 refills ago, ~4× more than 5 refills ago.
+// This is a tighter prior than linear weighting, but the learning loop
+// (codeSignalLifts) will increase or decrease recency weight per shop/code
+// if evidence shows recency actually predicts hits here.
 var s={},n=entries.length;
+var HALF_LIFE=3; // halves every 3 refills
 entries.forEach(function(e,i){
-var w=(i+1)/n;
+var age=n-1-i; // 0 = most recent
+var w=Math.pow(0.5,age/HALF_LIFE);
 e.codes.forEach(function(c){s[c]=(s[c]||0)+w;});
 });
+// Normalise to 0–1
+var maxS=Math.max.apply(null,Object.values(s).concat([0.001]));
+Object.keys(s).forEach(function(c){s[c]=s[c]/maxS;});
 return s;
 }
 function buildStreaks(entries){
-var st={},rev=entries.slice().reverse();
-for(var code=0;code<=99;code++){
-var c=String(code).padStart(2,'0'),streak=0;
+var st={};
+var rev=entries.slice().reverse();
+// Use actual codes from entries — not hardcoded 0-99 loop
+// (Prepares for future 3-digit expansion; no range assumption)
+var allCodes=Array.from(new Set(entries.reduce(function(a,e){return a.concat(e.codes);},[]) ));
+allCodes.forEach(function(c){
+var streak=0;
 for(var i=0;i<rev.length;i++){
 var cnt=rev[i].codes.filter(function(x){return x===c;}).length;
 if(cnt>0) streak+=1+(cnt-1)*0.5;
 else break;
 }
-if(streak>0)st[c]=streak;
-}
+if(streak>0) st[c]=streak;
+});
 return st;
 }
 function buildCooccurrence(entries){
@@ -3703,27 +3819,34 @@ return tightScore;
 function buildIntervalRegularity(entries){
 var reg={};
 var sorted=entries.slice().sort(function(a,b){return a.date.localeCompare(b.date);});
-var allCodes=Array.from(new Set(entries.reduce(function(a,e){return a.concat(e.codes);},[])));
+var allCodes=Array.from(new Set(entries.reduce(function(a,e){return a.concat(e.codes);},[]) ));
 allCodes.forEach(function(c){
-var appearances=sorted.filter(function(e){return e.codes.includes(c);});
+var appearances=[];
+sorted.forEach(function(e,i){
+if(e.codes.indexOf(c)>-1) appearances.push(i); // refill index, not date
+});
 if(appearances.length<3){ reg[c]=0; return; }
+// Gaps in refill counts (1 = appeared every refill, 2 = every other, etc.)
 var gaps=[];
 for(var i=1;i<appearances.length;i++){
-var d1=new Date(appearances[i-1].date+'T12:00:00');
-var d2=new Date(appearances[i].date+'T12:00:00');
-gaps.push(Math.round((d2-d1)/(1000*60*60*24)));
+gaps.push(appearances[i]-appearances[i-1]);
 }
 var mean=gaps.reduce(function(a,b){return a+b;},0)/gaps.length;
-if(mean===0){ reg[c]=0; return; }
 var variance=gaps.reduce(function(a,b){return a+Math.pow(b-mean,2);},0)/gaps.length;
-var cv=Math.sqrt(variance)/mean;
-reg[c]=Math.max(0,1-cv);
+var cv=mean>0?Math.sqrt(variance)/mean:1; // coefficient of variation
+// Low CV = regular intervals = high regularity score
+// cv=0 → perfect regularity (score=1), cv=1 → random (score=0)
+reg[c]=Math.max(0, 1-cv);
 });
 return reg;
 }
 function buildDowPattern(entries){
 var dow={};
-var today=new Date().getDay();
+// Use the date of the LAST entry — that's what we're predicting from,
+// not today which may be days after the last refill was entered
+var sorted=entries.slice().sort(function(a,b){return a.date.localeCompare(b.date);});
+var lastDate=sorted.length?sorted[sorted.length-1].date:null;
+var refillDow=lastDate?new Date(lastDate+'T12:00:00').getDay():new Date().getDay();
 entries.forEach(function(e){
 var d=new Date(e.date+'T12:00:00').getDay();
 var unique=Array.from(new Set(e.codes));
@@ -3737,51 +3860,62 @@ Object.keys(dow).forEach(function(c){
 var counts=dow[c];
 var total=counts.reduce(function(a,b){return a+b;},0);
 if(total===0){ score[c]=0.5; return; }
-var todayRate=counts[today]/total;
+var targetRate=counts[refillDow]/total;
 var expected=1/7;
-score[c]=Math.min(1, todayRate/expected/7);
+score[c]=Math.min(1, targetRate/expected/7);
 });
 return score;
 }
 function buildCycleScore(entries){
 var sorted=entries.slice().sort(function(a,b){return a.date.localeCompare(b.date);});
 var n=sorted.length;
-var allCodes=Array.from(new Set(entries.reduce(function(a,e){return a.concat(e.codes);},[])));
+var allCodes=Array.from(new Set(entries.reduce(function(a,e){return a.concat(e.codes);},[]) ));
 var cycleScore={};
 allCodes.forEach(function(c){
 var seq=sorted.map(function(e){return e.codes.indexOf(c)>-1?1:0;});
 if(seq.length<6){ cycleScore[c]=0; return; }
 var bestScore=0;
-[2,3,4].forEach(function(period){
-var correct=0, total=0;
+// Test periods 2–7 (was 2–4) — catches longer cycles
+[2,3,4,5,6,7].forEach(function(period){
+if(seq.length<period*2) return; // need at least 2 full cycles
+var correct=0,total=0;
 for(var i=period;i<seq.length;i++){
 var pred=seq[i-period];
 if(pred===seq[i]) correct++;
 total++;
 }
 var accuracy=total>0?correct/total:0;
-var baselineAccuracy=Math.max(
-seq.filter(function(v){return v===1;}).length/seq.length,
-seq.filter(function(v){return v===0;}).length/seq.length
-);
-var lift=accuracy-baselineAccuracy;
-if(lift>bestScore) bestScore=lift;
+// Weight score by how predictable the pattern is
+// A period-2 cycle with 90% accuracy scores higher than
+// a period-7 cycle with 70% accuracy (longer = less reliable prior)
+var periodPenalty=1-(period-2)*0.05; // slight discount for longer periods
+var score=(accuracy-0.5)*2*periodPenalty;
+if(score>bestScore) bestScore=score;
 });
-var lastAbsent=seq[seq.length-1]===0;
-cycleScore[c]=lastAbsent ? bestScore : bestScore*0.3;
+cycleScore[c]=Math.max(0,Math.min(1,bestScore));
 });
 return cycleScore;
 }
 function buildOverdueScore(entries){
+// Overdue: code is absent longer than its expected interval.
+// Two changes vs original:
+// 1. Just-appeared penalty — if code appeared in last refill, overdue=0
+//    (it just came, can't be overdue yet regardless of interval)
+// 2. Tighter appearance rate threshold (20% → any regular code qualifies)
+// The learning loop will lift overdue weight for shops where cycle patterns
+// are genuine, and suppress it for shops where overdue doesn't predict hits.
 var sorted=entries.slice().sort(function(a,b){return a.date.localeCompare(b.date);});
 var n=sorted.length;
+var lastEntry=sorted[n-1];
 var allCodes=Array.from(new Set(entries.reduce(function(a,e){return a.concat(e.codes);},[])));
 var overdue={};
 allCodes.forEach(function(c){
 var appearances=sorted.filter(function(e){return e.codes.indexOf(c)>-1;});
 if(appearances.length<3){ overdue[c]=0; return; }
+// Just-appeared penalty: if code was in the most recent refill, it can't be overdue
+if(lastEntry&&lastEntry.codes.indexOf(c)>-1){ overdue[c]=0; return; }
 var appRate=appearances.length/n;
-if(appRate<0.3){ overdue[c]=0; return; }
+if(appRate<0.15){ overdue[c]=0; return; } // lowered from 0.3 — more codes qualify
 var expectedInterval=1/appRate;
 var refillsSinceLast=0;
 for(var i=sorted.length-1;i>=0;i--){
@@ -3789,7 +3923,9 @@ if(sorted[i].codes.indexOf(c)>-1) break;
 refillsSinceLast++;
 }
 var overdueRatio=refillsSinceLast/expectedInterval;
-overdue[c]=Math.min(1, Math.max(0, overdueRatio-0.5)*2);
+// Only score when clearly overdue (>80% of interval elapsed, not just 50%)
+// Tighter threshold reduces false positives
+overdue[c]=Math.min(1, Math.max(0, (overdueRatio-0.8)*5));
 });
 return overdue;
 }
@@ -3843,30 +3979,37 @@ function buildBias(predictions){
 var bias={};
 var resolved=predictions.filter(function(p){return p.status!=='pending'&&p.outcome;});
 if(!resolved.length) return bias;
+var n=resolved.length;
+var HALF_LIFE=6; // halves every 6 predictions — older history fades
 var stats={};
-resolved.forEach(function(p){
+resolved.forEach(function(p,idx){
+var age=n-1-idx;
+var rw=Math.pow(0.5,age/HALF_LIFE);
 Object.keys(p.outcome).forEach(function(code){
-if(!stats[code])stats[code]={hits:0,total:0};
-stats[code].total++;
-if(p.outcome[code]==='hit')stats[code].hits++;
+if(!stats[code]) stats[code]={hits:0,total:0};
+var isHit=p.outcome[code]==='hit'?1:0;
+stats[code].hits+=isHit*rw;
+stats[code].total+=rw;
 });
 });
-Object.keys(stats).forEach(function(code){bias[code]=stats[code].hits/stats[code].total;});
+Object.keys(stats).forEach(function(code){
+bias[code]=stats[code].total>0?stats[code].hits/stats[code].total:0.5;
+});
 return bias;
 }
 var DEFAULT_WEIGHTS = {
 freq:     0.12,
-recency:  0.16,
+recency:  0.11,
 streak:   0.09,
 bias:     0.07,
-cooccur:  0.07,
-interval: 0.04,
+cooccur:  0.08,
+interval: 0.06,
 dow:      0.03,
-cycle:    0.07,
-overdue:  0.07,
+cycle:    0.09,
+overdue:  0.06,
 qtydom:   0.09,
 qtystreak:0.06,
-momentum: 0.13
+momentum: 0.14
 };
 var SIGNAL_KEYS = ['freq','recency','streak','bias','cooccur','interval','dow','cycle','overdue','qtydom','qtystreak','momentum'];
 var LEARNING_RATE = 0.03;
@@ -4182,6 +4325,44 @@ sig.overdue   * effectiveW.overdue   +
 sig.qtydom    * effectiveW.qtydom    +
 sig.qtystreak * effectiveW.qtystreak +
 sig.momentum  * (effectiveW.momentum||DEFAULT_WEIGHTS.momentum);
+// GAP 1: Per-code signal blending
+// Blend shop-level effectiveW (60%) with per-code lift from codeSignalLifts (40%)
+// Partial pooling: codes with little history stay close to shop weights
+// This lets model learn "cycle works for code 07 but not 34 in this shop"
+if(letter){
+var csl=(db.shops[letter]&&db.shops[letter].codeSignalLifts)||{};
+var cLifts=csl[c];
+if(cLifts&&cLifts.counts){
+var codeW={};
+var hasEvidence=false;
+SIGNAL_KEYS.forEach(function(k){
+var cnt=cLifts.counts[k]||0;
+if(cnt>=2){
+hasEvidence=true;
+var normLift=Math.max(-1,Math.min(1,(cLifts.lifts[k]||0)/cnt));
+var evidScale=Math.min(1,cnt/5); // need 5 observations for full effect
+var cShop=effectiveW[k]||DEFAULT_WEIGHTS[k];
+var cAdj=Math.max(0.01,Math.min(0.50,cShop+normLift*0.20*evidScale));
+// 60% shop weight + 40% code-specific adjustment
+codeW[k]=0.60*cShop+0.40*cAdj;
+} else {
+codeW[k]=effectiveW[k]||DEFAULT_WEIGHTS[k];
+}
+});
+if(hasEvidence){
+// Renormalise code weights
+var cSum=SIGNAL_KEYS.reduce(function(s,k){return s+(codeW[k]||0);},0);
+if(cSum>0) SIGNAL_KEYS.forEach(function(k){codeW[k]=(codeW[k]||0)/cSum;});
+// Recompute base with per-code weights
+base=
+sig.freq*codeW.freq+sig.recency*codeW.recency+sig.streak*codeW.streak+
+sig.bias*codeW.bias+sig.cooccur*codeW.cooccur+sig.interval*codeW.interval+
+sig.dow*codeW.dow+sig.cycle*codeW.cycle+sig.overdue*codeW.overdue+
+sig.qtydom*codeW.qtydom+sig.qtystreak*codeW.qtystreak+
+sig.momentum*(codeW.momentum||DEFAULT_WEIGHTS.momentum);
+}
+}
+}
 var qt = qtrend[c]||1.0;
 var mp = missPen[c]!==undefined ? missPen[c] : 1.0;
 var raw = base * qt * mp;
@@ -4936,6 +5117,7 @@ container.innerHTML = html;
 function renderDashboard(){
 if(!activeShop) return;
 db=loadDB();
+renderLearnerAlert(activeShop);
 var entries=shopEntries(activeShop);
 var preds=shopPreds(activeShop);
 if(entries.length<3){
@@ -7457,46 +7639,8 @@ if(resultEl) resultEl.innerHTML=
   +(unchanged.length?'<div style="font-size:10px;color:var(--muted);margin-top:6px">'+unchanged.length+' signals unchanged (insufficient recent evidence)</div>':'')
   +'<div style="font-size:11px;color:var(--muted);margin-top:8px">Tap <strong>Rebuild</strong> to apply to predictions.</div>';
 
-renderWeightRestorePills();
 }
-function restoreBestHitWeights(letter){
-letter=letter||activeShop;
-if(!letter){showToast('Select a shop first');return;}
-snapshotCurrentWeights(letter);
-db=loadDB();
-var preds=shopPreds(letter).filter(function(p){
-return p.status!=='pending'&&p.outcome&&p.weightsAtTime&&Object.keys(p.weightsAtTime).length>0;
-});
-if(!preds.length){
-document.getElementById('weight-restore-result').innerHTML='<div class="alert alert-warn">No resolved predictions with saved weights yet.</div>';
-return;
-}
-function hitRate(p){
-var h=0,t=0;
-Object.values(p.outcome).forEach(function(v){t++;if(v==='hit')h++;});
-return t>0?h/t:0;
-}
-var best=preds.reduce(function(a,b){
-var aR=hitRate(a), bR=hitRate(b);
-if(Math.abs(aR-bR)<0.001) return (a.slotsCovered||0)>=(b.slotsCovered||0)?a:b;
-return aR>=bR?a:b;
-});
-var bestRate=Math.round(hitRate(best)*100);
-var bestDate=best.actualDate||best.createdDate;
-var bestCodes=best.predictedCodes.join(', ');
-var hits=Object.values(best.outcome).filter(function(v){return v==='hit';}).length;
-db.shops[letter].weights=Object.assign({},best.weightsAtTime);
-saveDB(db);
-document.getElementById('weight-restore-result').innerHTML=
-'<div class="alert alert-success">'
-+'<strong>✅ Weights restored from '+bestDate+'</strong><br>'
-+'That prediction had <strong style="color:var(--green)">'+hits+'/'+best.predictedCodes.length+' hits ('+bestRate+'%)</strong><br>'
-+'Codes: '+bestCodes+'<br>'
-+'<span style="font-size:11px;color:var(--muted)">These are the signal weights that produced the most hits. Run Rebuild to see updated predictions.</span>'
-+'</div>';
-renderWeightRestorePills();
-showToast('Best-hit weights restored for '+letter);
-}
+
 function snapshotCurrentWeights(letter){
   letter=letter||activeShop;
   if(!letter) return;
@@ -7518,56 +7662,11 @@ function resetToCurrentWeights(){
   delete db.shops[activeShop].preManualWeights;
   saveDB(db);
   document.getElementById('optimize-result').innerHTML='<div class="alert alert-success">↩ Restored model\'s learned weights — the most recent state from gradient learning before any manual changes. Run Rebuild to apply.</div>';
-  renderWeightRestorePills();
-  showToast('Current model weights restored');
+    showToast('Current model weights restored');
 }
 
-function renderWeightRestorePills(){
-var el=document.getElementById('weight-restore-pills');
-if(!el||!activeShop) return;
-db=loadDB();
-var preds=shopPreds(activeShop).filter(function(p){
-return p.status!=='pending'&&p.outcome&&p.weightsAtTime&&Object.keys(p.weightsAtTime).length>0;
-});
-if(!preds.length){
-el.innerHTML='<span style="font-size:11px;color:var(--muted)">No resolved predictions yet for '+activeShop+'.</span>';
-return;
-}
-function hitRate(p){var h=0,t=0;Object.values(p.outcome).forEach(function(v){t++;if(v==='hit')h++;});return t>0?h/t:0;}
-var sorted=preds.slice().sort(function(a,b){return hitRate(b)-hitRate(a);}).slice(0,3);
-var currentW=JSON.stringify(getWeights(activeShop));
-el.innerHTML='<div style="font-size:11px;color:var(--muted);margin-bottom:5px">Tap to restore weights from a specific prediction:</div>'
-+sorted.map(function(p){
-var r=Math.round(hitRate(p)*100);
-var hits=Object.values(p.outcome).filter(function(v){return v==='hit';}).length;
-var d=(p.actualDate||p.createdDate).slice(5);
-var isActive=JSON.stringify(p.weightsAtTime)===currentW;
-var col=r===100?'var(--green)':r>=60?'var(--gold)':'var(--muted)';
-return '<button onclick="restoreWeightsFromPred(\''+p.id+'\')" '
-+'style="font-family:var(--mono);font-size:11px;font-weight:700;padding:4px 10px;border-radius:16px;'
-+'border:1px solid '+(isActive?'var(--green)':'var(--border)')+';'
-+'background:'+(isActive?'rgba(62,207,142,.15)':'var(--surface2)')+';'
-+'color:'+col+';cursor:pointer;margin-right:5px;margin-bottom:4px">'
-+d+' · '+hits+'/'+p.predictedCodes.length+' hits ('+r+'%)'
-+(isActive?' ✓':'')
-+'</button>';
-}).join('');
-}
-function restoreWeightsFromPred(predId){
-if(!activeShop) return;
-snapshotCurrentWeights(activeShop);
-db=loadDB();
-var pred=shopPreds(activeShop).find(function(p){return String(p.id)===String(predId);});
-if(!pred||!pred.weightsAtTime){showToast('Prediction not found');return;}
-db.shops[activeShop].weights=Object.assign({},pred.weightsAtTime);
-saveDB(db);
-var hits=Object.values(pred.outcome).filter(function(v){return v==='hit';}).length;
-document.getElementById('weight-restore-result').innerHTML=
-'<div class="alert alert-success">✅ Weights restored from '+(pred.actualDate||pred.createdDate)
-+' ('+hits+'/'+pred.predictedCodes.length+' hits). Run Rebuild to see effect.</div>';
-renderWeightRestorePills();
-showToast('Weights restored');
-}
+
+
 function rebuildActiveShop(){
 if(!activeShop){ showToast('Select a shop first'); return; }
 rebuildPredictions(activeShop);
