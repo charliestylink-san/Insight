@@ -479,6 +479,7 @@ label{display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bot
     <div class="btn-row" style="margin-bottom:12px">
       <button class="btn btn-secondary btn-small" onclick="exportShopData()">📤 Export JSON</button>
       <button class="btn btn-danger btn-small" onclick="clearShopData()">🗑 Clear Entries</button>
+      <button class="btn btn-secondary btn-small" onclick="toggleArchiveAllShops()" id="arch-all-btn">👁 All Shops Today</button>
     </div>
 
     <div id="archive-list"></div>
@@ -3710,9 +3711,47 @@ document.getElementById('confirm-msg').textContent=msg;
 confirmCallback=onOk;
 openModal('confirm-modal');
 }
+var archiveShowAll=false;
+function toggleArchiveAllShops(){
+archiveShowAll=!archiveShowAll;
+var btn=document.getElementById('arch-all-btn');
+if(btn) btn.textContent=archiveShowAll?'👁 This Shop Only':'👁 All Shops Today';
+renderArchive();
+}
 function renderArchive(){
 if(!activeShop) return;
 db=loadDB();
+if(archiveShowAll){
+// All shops — show today's entries across every shop
+var today=todayStr();
+var allEntries=[];
+Object.keys(db.shops).sort().forEach(function(code){
+  (db.shops[code].entries||[]).filter(function(e){return e.date===today;}).forEach(function(e){
+    allEntries.push({shop:code,entry:e});
+  });
+});
+var list=document.getElementById('archive-list');
+document.getElementById('a-entries').textContent=allEntries.length;
+document.getElementById('a-items').textContent=allEntries.reduce(function(a,x){return a+x.entry.codes.length;},0);
+document.getElementById('a-unique').textContent=new Set(allEntries.reduce(function(a,x){return a.concat(x.entry.codes);},[]) ).size;
+if(!allEntries.length){
+  list.innerHTML='<div class="empty-state"><div class="es-icon">📂</div><p>No entries today ('+today+') across any shop.</p></div>';
+  return;
+}
+list.innerHTML='<div style="font-size:11px;color:var(--muted);margin-bottom:8px">Showing all shops — '+today+'</div>'
+  +allEntries.map(function(x){
+    return '<div class="entry-item">'
+      +'<div class="entry-item-body">'
+      +'<div class="entry-meta">'
+      +'<div class="entry-date">📅 '+x.entry.date+' <strong style="color:var(--accent)">'+x.shop+'</strong></div>'
+      +'<div class="entry-codes">'+codesDisplay(x.entry.codes)+'</div>'
+      +'<span class="entry-badge source-text">'+x.entry.codes.length+' items</span>'
+      +'</div></div>'
+      +'</div>';
+  }).join('');
+return;
+}
+// Normal single-shop view
 var entries=shopEntries(activeShop);
 var allCodes=entries.reduce(function(a,e){return a.concat(e.codes);},[]);
 document.getElementById('a-entries').textContent=entries.length;
