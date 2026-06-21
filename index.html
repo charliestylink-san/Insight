@@ -854,6 +854,15 @@ label{display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bot
 
     
 
+    <div class="card" style="border-color:var(--gold)">
+      <div class="card-title" style="color:var(--gold)">🏆 BEST PREDICTION MODEL</div>
+      <p style="font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:10px">
+        The weights that produced your highest-hit prediction. Anchor the learner to this model — signal lifts adjust from here, not from current weights.
+      </p>
+      <div id="best-pred-list" style="margin-bottom:10px"></div>
+      <div id="best-pred-result" style="margin-top:6px"></div>
+    </div>
+
     <div class="card">
       <div class="card-title">🔧 REBUILD PREDICTIONS</div>
       <p style="font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:10px">
@@ -1170,6 +1179,7 @@ if(id==='confidence') renderConfidence();
 if(id==='guide')      renderGuide();
 if(id==='storage')    renderStoragePanel();
 if(id==='storage')    renderRebuildPills();
+if(id==='storage')    renderBestPredList();
 if(id==='storage'){
 var os=document.getElementById('optimize-status');
 if(os&&!os.innerHTML) os.innerHTML='<div style="font-size:11px;color:var(--muted)">'+( activeShop?shopEntries(activeShop).length+' entries available for optimization.':'Select a shop.')+'</div>';
@@ -7719,9 +7729,14 @@ if(entries.length<6){
   if(resultEl) resultEl.innerHTML='<div class="alert alert-warn">Need 6+ entries.</div>';
   return;
 }
-var origW=getWeights(activeShop);
-var RECENCY_HALF_LIFE=5;
-var LIFT_EXCLUDE=['bias']; // bias is outcome-derived — exclude to avoid double-counting
+// Use pinnedPred weights as anchor if set — learner adjusts from best-hit baseline
+var pinnedId=db.shops[activeShop].pinnedPredId;
+var anchorW=null;
+if(pinnedId){
+  var pinnedPred=preds.find(function(p){return String(p.id)===String(pinnedId);});
+  if(pinnedPred&&pinnedPred.weightsAtTime) anchorW=pinnedPred.weightsAtTime;
+}
+var origW=anchorW||getWeights(activeShop);
 var sigLift={},sigCount={};
 SIGNAL_KEYS.forEach(function(k){sigLift[k]=0;sigCount[k]=0;});
 var n=preds.length;
@@ -7866,6 +7881,77 @@ function rebuildActiveShop(){
 if(!activeShop){ showToast('Select a shop first'); return; }
 rebuildPredictions(activeShop);
 }
+function renderBestPredList(){
+var el=document.getElementById('best-pred-list');
+if(!el||!activeShop) return;
+db=loadDB();
+var preds=shopPreds(activeShop).filter(function(p){
+  return p.status!=='pending'&&p.outcome&&p.weightsAtTime&&Object.keys(p.weightsAtTime).length>0;
+});
+if(!preds.length){
+  el.innerHTML='<span style="font-size:12px;color:var(--muted)">No resolved predictions yet.</span>';
+  return;
+}
+function hitCount(p){return Object.values(p.outcome).filter(function(v){return v==='hit';}).length;}
+function hitRate(p){var t=p.predictedCodes.length;return t>0?hitCount(p)/t:0;}
+var pinned=db.shops[activeShop].pinnedPredId;
+var sorted=preds.slice().sort(function(a,b){
+  var diff=hitRate(b)-hitRate(a);
+  return diff!==0?diff:(b.actualDate||b.createdDate||'').localeCompare(a.actualDate||a.createdDate||'');
+}).slice(0,5);
+el.innerHTML=sorted.map(function(p){
+  var h=hitCount(p),t=p.predictedCodes.length;
+  var r=Math.round(h/t*100);
+  var d=(p.actualDate||p.createdDate||'').slice(5);
+  var col=r===100?'var(--green)':r>=60?'var(--gold)':'var(--muted)';
+  var isPinned=String(p.id)===String(pinned);
+  return '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">'
+    +'<div style="flex:1">'
+      +'<span style="font-family:var(--mono);font-size:12px;font-weight:900;color:'+col+'">'
+        +h+'/'+t+' hits ('+r+'%)'
+      +'</span>'
+      +'<span style="font-size:11px;color:var(--muted);margin-left:6px">'+d+'</span>'
+      +(isPinned?'<span style="font-size:10px;color:var(--gold);margin-left:6px">★ anchored</span>':'')
+      +'<div style="font-size:10px;color:var(--muted);margin-top:2px">'
+        +p.predictedCodes.map(function(c){
+          var hit=p.outcome[c]==='hit';
+          return '<span style="color:'+(hit?'var(--green)':'var(--muted)')+'">'+c+'</span>';
+        }).join(' ')
+      +'</div>'
+    +'</div>'
+    +'<button class="btn btn-secondary btn-small" style="'+(isPinned?'border-color:var(--gold);color:var(--gold)':'')+'" '
+      +'onclick="useBestPredModel(\''+p.id+'\')">'
+      +(isPinned?'★ Anchored':'Use this')
+    +'</button>'
+  +'</div>';
+}).join('');
+}
+
+function useBestPredModel(predId){
+if(!activeShop) return;
+db=loadDB();
+var preds=shopPreds(activeShop);
+var pred=preds.find(function(p){return String(p.id)===String(predId);});
+if(!pred||!pred.weightsAtTime){
+  document.getElementById('best-pred-result').innerHTML='<div class="alert alert-warn">Prediction not found or no weights stored.</div>';
+  return;
+}
+snapshotCurrentWeights(activeShop);
+// Apply the weights from this prediction as the new base
+db.shops[activeShop].weights=Object.assign({},pred.weightsAtTime);
+// Pin this prediction — learner uses its weights as anchor instead of current
+db.shops[activeShop].pinnedPredId=String(predId);
+saveDB(db);
+var h=Object.values(pred.outcome).filter(function(v){return v==='hit';}).length;
+var t=pred.predictedCodes.length;
+var d=pred.actualDate||pred.createdDate||'';
+document.getElementById('best-pred-result').innerHTML=
+  '<div class="alert alert-success">★ Anchored to '+(d.slice(5))+' model ('+h+'/'+t+' hits). '
+  +'Signal lifts will now adjust from this baseline. Run <strong>Rebuild</strong> to apply.</div>';
+renderBestPredList();
+showToast('Best-hit model anchored for '+activeShop);
+}
+
 function renderRebuildPills(){
 var el=document.getElementById('rebuild-shop-pills');
 if(!el) return;
