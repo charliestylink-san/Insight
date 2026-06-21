@@ -1490,27 +1490,8 @@ qtystreak:qs2[c]||0
 p.surpriseSnapshot=surpriseSnap;
 p.surpriseCodes=surpriseCodes;
 }}
-// ── Per-code weight lift: update code-level signal affinity ──
-// Blend per-code lift with shop-level weights (60/40 partial pooling)
-// so low-data codes stay close to shop average
-var codeLifts=db.shops[letter].codeSignalLifts||{};
-var allCodes=p.predictedCodes.concat(surpriseCodes||[]);
-allCodes.forEach(function(c){
-var isHit=actualCodes.indexOf(c)>-1?1:0;
-var snap=(c===p.predictedCodes[0]?p.signalSnapshot&&p.signalSnapshot[c]:p.surpriseSnapshot&&p.surpriseSnapshot&&p.surpriseSnapshot[c])||
-(p.signalSnapshot&&p.signalSnapshot[c])||
-(p.surpriseSnapshot&&p.surpriseSnapshot[c])||null;
-if(!snap) return;
-if(!codeLifts[c]) codeLifts[c]={counts:{},lifts:{}};
-SIGNAL_KEYS.forEach(function(k){
-var sv=snap[k]||0;
-if(sv>0){
-codeLifts[c].lifts[k]=(codeLifts[c].lifts[k]||0)+(isHit-0.5)*(sv-0.5)*4;
-codeLifts[c].counts[k]=(codeLifts[c].counts[k]||0)+1;
-}
-});
-});
-db.shops[letter].codeSignalLifts=codeLifts;
+// ── SEQUENCE: freeze → compare → save new prediction → THEN learn ──
+// codeSignalLifts updated by runBackgroundLearner AFTER new prediction is saved
 // Triggered outcomes
 var allT=Array.from(new Set((p.promotedCodes||[]).concat(p.watchoutCodes||[]).filter(function(c){return p.predictedCodes.indexOf(c)===-1;})));
 var fullSc=db.shops[letter].lastFullScores||{};
@@ -1757,6 +1738,33 @@ db.shops[letter].learnerAlert={
   learnedOnly:learnedOnly,currentOnly:currentOnly,
   topBoost:topBoost,topReduce:topReduce,learnedW:learnedW
 };
+// ── Update per-code signal lifts (correct sequence: after new prediction is frozen) ──
+var codeLifts=db.shops[letter].codeSignalLifts||{};
+var allPreds=shopPreds(letter);
+var n2=allPreds.filter(function(p){return p.status!=='pending'&&p.outcome;}).length;
+var idx2=0;
+allPreds.filter(function(p){return p.status!=='pending'&&p.outcome&&!p.codeLiftsProcessed;}).forEach(function(p){
+  var age=n2-1-idx2; idx2++;
+  var rw=Math.pow(0.5,age/5);
+  var allSnaps=p.frozenSnapshots||p.signalSnapshot||{};
+  var isCompact=!!(p.frozenSnapshots&&p.modelVersion);
+  var allCodes2=(p.predictedCodes||[]).concat(p.surpriseCodes||[]);
+  allCodes2.forEach(function(c){
+    var rawSnap=allSnaps[c]; if(!rawSnap) return;
+    var isHit=(p.actualCodes||[]).indexOf(c)>-1?1:0;
+    if(!codeLifts[c]) codeLifts[c]={counts:{},lifts:{}};
+    SIGNAL_KEYS.forEach(function(k){
+      if(k==='bias') return;
+      var sv=isCompact?(rawSnap[k]||0)/100:(rawSnap[k]||0);
+      if(sv>0){
+        codeLifts[c].lifts[k]=(codeLifts[c].lifts[k]||0)+(isHit-0.5)*(sv-0.5)*4*rw;
+        codeLifts[c].counts[k]=(codeLifts[c].counts[k]||0)+rw;
+      }
+    });
+  });
+  p.codeLiftsProcessed=true;
+});
+db.shops[letter].codeSignalLifts=codeLifts;
 saveDB(db);
 if(curPanel()==='dashboard') renderLearnerAlert(letter);
 }
@@ -6299,9 +6307,17 @@ var sp=Math.round((scores[c]||0)/maxS*100);
 var col=isHit?'var(--green)':'var(--red)';
 var icon=isHit?'✓':'✗';
 var isPromoted=p.promotedCodes&&p.promotedCodes.indexOf(c)>-1;
-var snap=p.signalSnapshot&&p.signalSnapshot[c]||{};
+// Use frozenSnapshots (compact 0-100 ints) if available, else signalSnapshot
+var frozenSnap=p.frozenSnapshots&&p.frozenSnapshots[c];
+var rawSnap=frozenSnap
+  ?Object.keys(frozenSnap).reduce(function(o,k){o[k]=frozenSnap[k]/100;return o;},{})
+  :(p.signalSnapshot&&p.signalSnapshot[c]||{});
 var wts=p.weightsAtTime||DEFAULT_WEIGHTS;
-var grade=buildCodeConfidenceGrade(c,snap,wts,entries2,predsAll,activeShop,sp);
+// Use only entries/predictions that existed at prediction time — not current state
+// This freezes the grade to what it was when the prediction was made
+var trainEntries=entries2.filter(function(e){return e.date<=p.createdDate;});
+var trainPreds=predsAll.filter(function(q){return q.createdDate<p.createdDate;});
+var grade=buildCodeConfidenceGrade(c,rawSnap,wts,trainEntries,trainPreds,activeShop,sp);
 return '<div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">'
 +'<span style="font-family:var(--mono);font-size:12px;font-weight:900;color:'+col+';min-width:24px">'+c+'</span>'
 +(isPromoted?'<span style="font-size:9px">🔬</span>':'<span style="min-width:14px"></span>')
@@ -6353,9 +6369,12 @@ var sp=t.scorePct!==null&&t.scorePct!==undefined
 ?t.scorePct
 :(scores[c]?Math.round(scores[c]/fullMaxS*100):null);
 var barCol=t.type==='promoted'?'var(--green)':'var(--gold)';
-var snap2=p.signalSnapshot&&p.signalSnapshot[c]||{};
+var frozenSnap2=p.frozenSnapshots&&p.frozenSnapshots[c];
+var rawSnap2=frozenSnap2
+  ?Object.keys(frozenSnap2).reduce(function(o,k){o[k]=frozenSnap2[k]/100;return o;},{})
+  :(p.signalSnapshot&&p.signalSnapshot[c]||{});
 var wts2=p.weightsAtTime||DEFAULT_WEIGHTS;
-var grade2=buildCodeConfidenceGrade(c,snap2,wts2,entries2,predsAll,activeShop,sp||0);
+var grade2=buildCodeConfidenceGrade(c,rawSnap2,wts2,trainEntries,trainPreds,activeShop,sp||0);
 triggLines+='<div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">'
 +'<span style="font-size:10px;flex-shrink:0;min-width:18px">'+typeIcon+'</span>'
 +'<span style="font-family:var(--mono);font-size:12px;font-weight:900;color:'+col+';min-width:24px">'+c+'</span>'
