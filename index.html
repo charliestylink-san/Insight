@@ -6301,22 +6301,20 @@ var isNormalised=rawMax<=100&&rawMax>=1;
 var maxS=isNormalised?rawMax:p.predictedCodes.reduce(function(m,c){return Math.max(m,scores[c]||0);},0.001);
 var entries2=shopEntries(activeShop);
 var predsAll=shopPreds(activeShop);
+// Slice to prediction-time data — freezes grades to what model knew then
+var trainEntries=entries2.filter(function(e){return e.date<=p.createdDate;});
+var trainPreds=predsAll.filter(function(q){return q.createdDate<p.createdDate;});
 var codeLines=p.predictedCodes.map(function(c){
 var isHit=p.outcome[c]==='hit';
 var sp=Math.round((scores[c]||0)/maxS*100);
 var col=isHit?'var(--green)':'var(--red)';
 var icon=isHit?'✓':'✗';
 var isPromoted=p.promotedCodes&&p.promotedCodes.indexOf(c)>-1;
-// Use frozenSnapshots (compact 0-100 ints) if available, else signalSnapshot
 var frozenSnap=p.frozenSnapshots&&p.frozenSnapshots[c];
 var rawSnap=frozenSnap
   ?Object.keys(frozenSnap).reduce(function(o,k){o[k]=frozenSnap[k]/100;return o;},{})
   :(p.signalSnapshot&&p.signalSnapshot[c]||{});
 var wts=p.weightsAtTime||DEFAULT_WEIGHTS;
-// Use only entries/predictions that existed at prediction time — not current state
-// This freezes the grade to what it was when the prediction was made
-var trainEntries=entries2.filter(function(e){return e.date<=p.createdDate;});
-var trainPreds=predsAll.filter(function(q){return q.createdDate<p.createdDate;});
 var grade=buildCodeConfidenceGrade(c,rawSnap,wts,trainEntries,trainPreds,activeShop,sp);
 return '<div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">'
 +'<span style="font-family:var(--mono);font-size:12px;font-weight:900;color:'+col+';min-width:24px">'+c+'</span>'
