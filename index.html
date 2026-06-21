@@ -1030,6 +1030,19 @@ var label={high:'HIGH',moderate:'MODERATE',low:'LOW'}[level];
 return {level:level,hitRate:hitRate,slotCov:slotPct,label:label,cls:cls,n:last5.length,
 caption:'last '+last5.length+' predictions'};
 }
+function checkStorageHealth(){
+try{
+var used=JSON.stringify(localStorage).length;
+var pct=Math.round(used/5242880*100); // 5MB limit
+if(pct>80){
+var banner=document.createElement('div');
+banner.style.cssText='position:fixed;bottom:70px;left:12px;right:12px;background:rgba(245,158,11,.95);color:#000;padding:10px 14px;border-radius:10px;font-size:12px;z-index:9999;font-weight:600';
+banner.innerHTML='⚠️ Storage '+pct+'% full ('+Math.round(used/1024)+'KB/5120KB). Go to DATA → export backup, then Rebuild to free space.';
+setTimeout(function(){if(banner.parentNode)banner.parentNode.removeChild(banner);},8000);
+document.body.appendChild(banner);
+}
+}catch(e){}
+}
 function loadDB(){
 try{
 var d=JSON.parse(localStorage.getItem(DB_KEY));
@@ -1074,27 +1087,49 @@ Object.keys(d.shops||{}).forEach(function(letter){
 return d;
 }
 function saveDB(d){
-try{
 d=cleanupStorage(d);
-var str=JSON.stringify(d);
-localStorage.setItem(DB_KEY,str);
-localStorage.setItem(DB_BAK,str);
-}catch(e){
-// Quota exceeded — try stripping more aggressively then retry
-if(e.name==='QuotaExceededError'||e.code===22){
-Object.keys(d.shops||{}).forEach(function(letter){
-  (d.shops[letter].predictions||[]).forEach(function(p){
-    delete p.frozenSnapshots;
-    delete p.frozenScores;
-  });
-});
-try{
-  var str2=JSON.stringify(d);
-  localStorage.setItem(DB_KEY,str2);
-  localStorage.setItem(DB_BAK,str2);
-  console.warn('Storage quota: stripped frozenSnapshots/frozenScores to fit');
-}catch(e2){console.error('Storage still full after cleanup:',e2);}
+// Three-tier save — each tier strips more to fit under quota
+// Tier 1: normal save with cleanup
+var tiers=[
+  function(data){return JSON.stringify(data);},
+  // Tier 2: strip all frozenSnapshots + frozenScores
+  function(data){
+    Object.keys(data.shops||{}).forEach(function(s){
+      (data.shops[s].predictions||[]).forEach(function(p){
+        delete p.frozenSnapshots; delete p.frozenScores;
+      });
+    });
+    return JSON.stringify(data);
+  },
+  // Tier 3: strip ALL predictions (entries are king — never lose entries)
+  function(data){
+    Object.keys(data.shops||{}).forEach(function(s){
+      data.shops[s].predictions=[];
+      delete data.shops[s].obsWindow;
+      delete data.shops[s].gradAccum;
+      delete data.shops[s].codeSignalLifts;
+      delete data.shops[s].learnerAlert;
+      delete data.shops[s].preManualWeights;
+    });
+    return JSON.stringify(data);
+  }
+];
+var saved=false;
+for(var t=0;t<tiers.length;t++){
+  try{
+    var str=tiers[t](d);
+    localStorage.setItem(DB_KEY,str);
+    localStorage.setItem(DB_BAK,str);
+    saved=true;
+    if(t>0) showToast('Storage full — '+(t===1?'stripped model cache':'stripped predictions to save entries'),'warn');
+    break;
+  }catch(e){
+    if(e.name!=='QuotaExceededError'&&e.code!==22) throw e;
+    // continue to next tier
+  }
 }
+if(!saved){
+  showToast('⚠️ Storage completely full — entries may not have saved. Go to DATA and export a backup.','warn');
 }
 }
 function getApiKey(){ return localStorage.getItem(AK_KEY)||''; }
@@ -8234,6 +8269,7 @@ if(chev){ chev.classList.toggle('open'); }
 });
 renderShopPills();
 renderRebuildPills();
+checkStorageHealth();
 updateAllBanners();
 var shops=Object.keys(db.shops).sort();
 if(shops.length){
