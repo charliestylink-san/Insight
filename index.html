@@ -1541,6 +1541,8 @@ Object.keys(snapshots).forEach(function(c){
   if(Object.keys(compacted).length) compactSnaps[c]=compacted;
 });
 db.shops[letter].lastFullScores=frozenScores;
+// Top-5 display scores (normalised 0-100)
+var top5Scores=top5.reduce(function(o,x){o[x[0]]=Math.round(x[1]/top5Max*100);return o;},{});
 // Keep only last 10 frozenSnapshots to bound storage
 // Learner uses recent predictions most (recency-weighted) so old ones matter less
 var existingPreds=preds.filter(function(p){return p.status!=='pending';});
