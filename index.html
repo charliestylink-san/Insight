@@ -1055,10 +1055,46 @@ return old;
 return {shops:{}};
 }catch(e){ return {shops:{}}; }
 }
+function cleanupStorage(d){
+// Trim frozenSnapshots/frozenScores from old predictions to stay under localStorage quota
+// frozenSnapshots: keep last 10 per shop (enough for recency-weighted learner)
+// frozenScores: keep last 20 per shop (display fallback for history)
+Object.keys(d.shops||{}).forEach(function(letter){
+  var preds=(d.shops[letter].predictions||[]).filter(function(p){return p.status!=='pending';});
+  // Sort newest first
+  var sorted=preds.slice().sort(function(a,b){
+    return (b.actualDate||b.createdDate||'').localeCompare(a.actualDate||a.createdDate||'');
+  });
+  sorted.forEach(function(p,idx){
+    if(idx>=10) delete p.frozenSnapshots;  // keep last 10
+    if(idx>=20) delete p.frozenScores;    // keep last 20
+  });
+});
+return d;
+}
 function saveDB(d){
+try{
+d=cleanupStorage(d);
 var str=JSON.stringify(d);
 localStorage.setItem(DB_KEY,str);
 localStorage.setItem(DB_BAK,str);
+}catch(e){
+// Quota exceeded — try stripping more aggressively then retry
+if(e.name==='QuotaExceededError'||e.code===22){
+Object.keys(d.shops||{}).forEach(function(letter){
+  (d.shops[letter].predictions||[]).forEach(function(p){
+    delete p.frozenSnapshots;
+    delete p.frozenScores;
+  });
+});
+try{
+  var str2=JSON.stringify(d);
+  localStorage.setItem(DB_KEY,str2);
+  localStorage.setItem(DB_BAK,str2);
+  console.warn('Storage quota: stripped frozenSnapshots/frozenScores to fit');
+}catch(e2){console.error('Storage still full after cleanup:',e2);}
+}
+}
 }
 function getApiKey(){ return localStorage.getItem(AK_KEY)||''; }
 var db={shops:{}}, activeShop=null;
@@ -1320,18 +1356,19 @@ return codes.slice().sort().join('|');
 }
 function isDuplicateInShop(letter,date,codes){
 var sig=refillSig(codes);
-return shopEntries(letter).some(function(e){
-return e.date===date && refillSig(e.codes)===sig;
+var found=shopEntries(letter).find(function(e){
+  return e.date===date && refillSig(e.codes)===sig;
 });
+return found||null;
 }
 function isDuplicateAcrossShops(excludeLetter,date,codes){
 var sig=refillSig(codes);
 var found=null;
 Object.keys(db.shops).forEach(function(code){
-if(code===excludeLetter) return;
-(db.shops[code].entries||[]).forEach(function(e){
-if(e.date===date && refillSig(e.codes)===sig) found=code;
-});
+  if(code===excludeLetter) return;
+  (db.shops[code].entries||[]).forEach(function(e){
+    if(e.date===date && refillSig(e.codes)===sig) found=code;
+  });
 });
 return found;
 }
@@ -1341,13 +1378,14 @@ var codes=parseCodes(document.getElementById('text-input').value);
 if(!codes.length){showToast('No valid codes found','warn');return;}
 var date=document.getElementById('text-date').value||todayStr();
 db=loadDB();
-if(isDuplicateInShop(activeShop,date,codes)){
-showToast('Duplicate — this refill is already saved for Shop '+activeShop,'warn');
+var dup=isDuplicateInShop(activeShop,date,codes);
+if(dup){
+showToast('Duplicate — '+date+' already saved for '+activeShop+': '+dup.codes.join(' '),'warn');
 return;
 }
 var clash=isDuplicateAcrossShops(activeShop,date,codes);
 if(clash){
-showToast('Duplicate — identical refill already exists in Shop '+clash,'warn');
+showToast('Duplicate — identical refill already in Shop '+clash,'warn');
 return;
 }
 showContinuityWarning(activeShop, date);
@@ -1489,22 +1527,31 @@ var frozenScores={};
 Object.keys(scores).forEach(function(c){
   frozenScores[c]=Math.round(scores[c]/fullMax*100);
 });
-// All signal snapshots (not just top-5) — lets learner see what signals said
-// for codes that arrived as surprises
-var frozenSnapshots={};
-Object.keys(snapshots).forEach(function(c){frozenSnapshots[c]=snapshots[c];});
-// Top-5 frozen scores for display
-var top5Scores=top5.reduce(function(o,x){
-  o[x[0]]=Math.round(x[1]/top5Max*100);
-  return o;
-},{});
+// Compact frozenSnapshots: signal values as 0-100 integers, not floats
+// This saves ~60% storage vs raw float keys
+var compactSnaps={};
+Object.keys(snapshots).forEach(function(c){
+  var snap=snapshots[c];
+  if(!snap) return;
+  var compacted={};
+  SIGNAL_KEYS.forEach(function(k){
+    var v=snap[k];
+    if(v!=null&&v>0) compacted[k]=Math.round(v*100); // 0.72 → 72
+  });
+  if(Object.keys(compacted).length) compactSnaps[c]=compacted;
+});
 db.shops[letter].lastFullScores=frozenScores;
+// Keep only last 10 frozenSnapshots to bound storage
+// Learner uses recent predictions most (recency-weighted) so old ones matter less
+var existingPreds=preds.filter(function(p){return p.status!=='pending';});
+var predsWithSnaps=existingPreds.filter(function(p){return p.frozenSnapshots;}).length;
+var storeSnaps=predsWithSnaps<10; // only store if under cap
 db.shops[letter].predictions=preds.filter(function(p){return p.status!=='pending';});
 db.shops[letter].predictions.push({
   id:Date.now(),
   createdDate:lastEntryDate,
   targetDate:null,
-  modelVersion:SIGNAL_VERSION,            // which signal code made this prediction
+  modelVersion:SIGNAL_VERSION,
   predictedCodes:top5.map(function(x){return x[0];}),
   promotedCodes:(result.promotions||[]).map(function(p){return p.promoted;}),
   patternRules:(result.promotions||[]).map(function(p){
@@ -1512,9 +1559,9 @@ db.shops[letter].predictions.push({
   }),
   watchoutCodes:(result.watchouts||[]).map(function(w){return w.code;}),
   regimeAtTime:result.regime?{shifting:result.regime.shifting,note:result.regime.note||''}:null,
-  scores:top5Scores,                      // top-5 display scores (normalised 0-100)
-  frozenScores:frozenScores,              // ALL codes scored — immutable model snapshot
-  frozenSnapshots:frozenSnapshots,        // ALL signal values — for learner analysis
+  scores:top5Scores,
+  frozenScores:frozenScores,
+  frozenSnapshots:storeSnaps?compactSnaps:null, // only store if under cap
   weightsAtTime:Object.assign({},result.weights),
   status:'pending',
   outcome:null,
@@ -1542,18 +1589,22 @@ var n=resolved.length;
 resolved.forEach(function(p,idx){
   var age=n-1-idx;
   var rw=Math.pow(0.5,age/HALF_LIFE);
-  // Predicted codes (hits and misses)
-  // Exclude 'bias' — it's already recency-weighted outcome history.
-  // Including it in lift would double-count outcomes (bias IS the hit signal).
   var LIFT_EXCLUDE=['bias'];
+  // Decompress compact snapshots (0-100 int → 0-1 float) if stored compactly
+  var isCompact=!!(p.frozenSnapshots&&p.modelVersion);
+  function getSignalVal(snaps,c,k){
+    var s=snaps&&snaps[c]; if(!s) return 0;
+    var v=s[k]||0;
+    return isCompact?v/100:v; // compact=integer, old=float
+  }
+  var allSnaps=p.frozenSnapshots||p.signalSnapshot||{};
+  // Predicted codes
   p.predictedCodes.forEach(function(c){
     var isHit=p.outcome[c]==='hit'?1:0;
-    // Prefer frozenSnapshots (has all codes) over signalSnapshot (top-5 only)
-    var snap=(p.frozenSnapshots&&p.frozenSnapshots[c])||(p.signalSnapshot&&p.signalSnapshot[c]);
-    if(!snap) return;
+    if(!allSnaps[c]) return;
     SIGNAL_KEYS.forEach(function(k){
       if(LIFT_EXCLUDE.indexOf(k)>-1) return;
-      var sv=snap[k]||0;
+      var sv=getSignalVal(allSnaps,c,k);
       if(sv>0){
         sigLift[k]+=(isHit-0.5)*(sv-0.5)*4*rw;
         sigCount[k]+=rw;
@@ -1561,18 +1612,15 @@ resolved.forEach(function(p,idx){
     });
   });
   // Surprise codes — arrived but not predicted
-  // Use frozenSnapshots if available (all codes scored at prediction time)
-  var sSnap=p.frozenSnapshots||p.surpriseSnapshot||{};
-  // Surprise codes = arrived + not in predicted top-5
+  var allSurpSnaps=p.frozenSnapshots||p.surpriseSnapshot||{};
   var surprises=p.surpriseCodes||(p.actualCodes||[]).filter(function(c){
     return p.predictedCodes.indexOf(c)===-1;
   });
   surprises.forEach(function(c){
-    var snap=sSnap[c];
-    if(!snap) return;
+    if(!allSurpSnaps[c]) return;
     SIGNAL_KEYS.forEach(function(k){
       if(LIFT_EXCLUDE.indexOf(k)>-1) return;
-      var sv=snap[k]||0;
+      var sv=getSignalVal(allSurpSnaps,c,k);
       if(sv>0){
         sigLift[k]+=(0.5)*(sv-0.5)*4*rw*0.7;
         sigCount[k]+=rw*0.7;
@@ -1600,13 +1648,13 @@ function scoreWeights(w,testPredictions){
   testPredictions.forEach(function(p){
     var top5;
     if(p.frozenSnapshots&&Object.keys(p.frozenSnapshots).length){
-      // Fast path: re-score frozen signal values × candidate weights
-      // No need to recompute signals from entries — the snapshot is the ground truth
+      var isC=!!(p.modelVersion); // compact format = 0-100 integers
       var scored={};
       Object.keys(p.frozenSnapshots).forEach(function(c){
         var snap=p.frozenSnapshots[c];
         scored[c]=SIGNAL_KEYS.reduce(function(sum,k){
-          return sum+(snap[k]||0)*(w[k]||DEFAULT_WEIGHTS[k]);
+          var sv=isC?(snap[k]||0)/100:(snap[k]||0);
+          return sum+sv*(w[k]||DEFAULT_WEIGHTS[k]);
         },0);
       });
       top5=Object.entries(scored).sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];});
@@ -7781,7 +7829,7 @@ db=loadDB();
 var s=db.shops[letter];
 var entries=(s.entries||[]).slice().sort(function(a,b){return a.date.localeCompare(b.date);});
 if(entries.length<4){ onDone(0); return; }
-var liveResolved=(s.predictions||[]).filter(function(p){return p.liveResolved;});
+var liveResolved=(s.predictions||[]).filter(function(p){return p.liveResolved&&p.outcome&&Object.keys(p.outcome).length>0;});
 var liveResolvedDates=liveResolved.reduce(function(m,p){m[p.actualDate]=true;return m;},{});
 var lastEntryDate=entries[entries.length-1].date;
 var existing=(s.predictions||[]).filter(function(p){return p.status==='pending';});
@@ -7840,18 +7888,6 @@ db=loadDB();
 var trainEntries=entries.slice(0,i+1);
 var nextEntry=entries[i+1];
 if(liveResolvedDates[nextEntry.date]){
-i++;
-showProgress(letter, i-2, total);
-setTimeout(processStep, 0);
-return;
-}
-// Skip if a live prediction with frozenScores exists for this training window
-// frozenScores = made by the live model, immutable — rebuild never overwrites
-var trainEndDate=trainEntries[trainEntries.length-1].date;
-var hasLiveSnapshot=shopPreds(letter).some(function(p){
-  return p.createdDate===trainEndDate&&p.frozenScores;
-});
-if(hasLiveSnapshot){
 i++;
 showProgress(letter, i-2, total);
 setTimeout(processStep, 0);
