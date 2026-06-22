@@ -1567,15 +1567,17 @@ Object.keys(snapshots).forEach(function(c){
   });
   if(Object.keys(compacted).length) compactSnaps[c]=compacted;
 });
+// CRITICAL: never replace resolved predictions — they are frozen records
+// Only remove the pending prediction, keep all resolved ones intact
+var existingPreds=db.shops[letter].predictions||[];
+var resolvedPreds=existingPreds.filter(function(p){return p.status!=='pending';});
+db.shops[letter].predictions=resolvedPreds;
 db.shops[letter].lastFullScores=frozenScores;
 // Top-5 display scores (normalised 0-100)
 var top5Scores=top5.reduce(function(o,x){o[x[0]]=Math.round(x[1]/top5Max*100);return o;},{});
-// Keep only last 10 frozenSnapshots to bound storage
-// Learner uses recent predictions most (recency-weighted) so old ones matter less
-var existingPreds=preds.filter(function(p){return p.status!=='pending';});
-var predsWithSnaps=existingPreds.filter(function(p){return p.frozenSnapshots;}).length;
-var storeSnaps=predsWithSnaps<10; // only store if under cap
-db.shops[letter].predictions=preds.filter(function(p){return p.status!=='pending';});
+// Only store frozenSnapshots if under cap of 10 (storage bound)
+var predsWithSnaps=resolvedPreds.filter(function(p){return p.frozenSnapshots;}).length;
+var storeSnaps=predsWithSnaps<10;
 db.shops[letter].predictions.push({
   id:Date.now(),
   createdDate:lastEntryDate,
@@ -5737,9 +5739,16 @@ resEl.innerHTML=html;
 function predCardHTML(pred, canResolve){
 var sLabels={pending:'⏳',hit:'✅',partial:'⚡',miss:'❌'};
 var sColors={pending:'var(--muted)',hit:'var(--green)',partial:'var(--gold)',miss:'var(--red)'};
+// Use frozenScores (all codes 0-100) for bar widths — never top-5-only scores
+// This ensures every code has a score regardless of its rank
+var frozenScores=pred.frozenScores||{};
 var scores=pred.scores||{};
-var rawMaxScore=Math.max.apply(null,Object.values(scores).concat([0]));
-var maxScore=rawMaxScore>1?rawMaxScore:0.001;
+// Merge: frozenScores has all codes, scores has top-5 normalised display values
+// Prefer frozenScores for completeness, fall back to scores for top-5
+var allScores={};
+Object.keys(frozenScores).forEach(function(c){allScores[c]=frozenScores[c];});
+Object.keys(scores).forEach(function(c){if(!allScores[c]) allScores[c]=scores[c];});
+var maxScore=Math.max.apply(null,Object.values(allScores).concat([1]));
 var lt=activeShop&&db.shops[activeShop]&&db.shops[activeShop].learnedThresholds||null;
 var allCodes=[];
 var seen=new Set();
@@ -5785,7 +5794,7 @@ var isHit=outcome==='hit', isMiss=outcome==='miss', isPart=outcome==='partial';
 var isPending=!outcome;
 var outcomeCol=isHit?'var(--green)':isPart?'var(--gold)':isMiss?'var(--red)':'var(--muted)';
 var icon=isHit?'✓':isPart?'~':isMiss?'✗':isPending?'':'·';
-var scorePct=maxScore>0?Math.round((scores[c]||0)/maxScore*100):0;
+var scorePct=maxScore>0?Math.round((allScores[c]||0)/maxScore*100):0;
 var barCol=meta.barCol||(isHit?'var(--green)':isPart?'var(--gold)':'var(--red)');
 var codeCol=isPending?(meta.labelCol||'var(--accent)'):outcomeCol;
 var threshMark='';
