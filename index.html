@@ -4492,8 +4492,8 @@ var liveResolved=(s.predictions||[]).filter(function(p){return p.liveResolved&&p
 var liveResolvedDates=liveResolved.reduce(function(m,p){m[p.actualDate]=true;return m;},{});
 var lastEntryDate=entries[entries.length-1].date;
 var existing=(s.predictions||[]).filter(function(p){return p.status==='pending';});
-var livePendingToKeep=existing.length>0&&existing[0].createdDate>=lastEntryDate
-?existing[0]:null;
+var livePendingToKeep=existing.length>0&&existing[0].createdDate>=lastEntryDate?existing[0]:null;
+// Clear auto predictions, keep live resolved
 db.shops[letter].predictions=(s.predictions||[]).filter(function(p){return !p.auto||p.liveResolved;});
 db.shops[letter].obsWindow={};
 db.shops[letter].gradAccum={};
@@ -4501,7 +4501,9 @@ saveDB(db);
 var i=2;
 var resolvedCount=0;
 var total=entries.length-2;
+var STEP_DELAY=50; // ms — gives iOS Safari time to breathe between steps
 function processStep(){
+// Done — build final pending prediction
 if(i>=entries.length-1){
 db=loadDB();
 var allEntries=(db.shops[letter].entries||[]).slice().sort(function(a,b){return a.date.localeCompare(b.date);});
@@ -4515,24 +4517,28 @@ var finalResult=buildCombinedScore(allEntries,allPreds,letter);
 var finalTop5=Object.entries(finalResult.scores).sort(function(a,b){return b[1]-a[1];}).slice(0,5);
 if(finalTop5.length){
 var fMax=finalTop5[0][1];
-var fPatterns=buildEmergentPatterns(allEntries,allPreds);
-var fApplied=applyEmergentToTop3(finalTop5.slice(),fPatterns,finalResult.scores);
-var fWatchouts=buildWatchouts(allEntries,allPreds,finalResult,finalTop5.map(function(x){return x[0];}),letter);
 var fFullMax=Math.max.apply(null,Object.values(finalResult.scores).concat([0.001]));
 var fNorm={};
 Object.keys(finalResult.scores).forEach(function(c){fNorm[c]=Math.round(finalResult.scores[c]/fFullMax*100);});
 db.shops[letter].lastFullScores=fNorm;
+// Compact snapshots
+var compactSnaps={};
+Object.keys(finalResult.snapshots||{}).forEach(function(c){
+var snap=finalResult.snapshots[c];if(!snap)return;
+var cs={};Object.keys(snap).forEach(function(k){if(snap[k]>0)cs[k]=Math.round(snap[k]*100);});
+if(Object.keys(cs).length)compactSnaps[c]=cs;
+});
+var predId=Date.now();
+saveSnapshot(predId,compactSnaps);
 db.shops[letter].predictions.push({
-id:Date.now(),
-createdDate:allEntries[allEntries.length-1].date,
-targetDate:null,
+id:predId,createdDate:allEntries[allEntries.length-1].date,
+modelVersion:SIGNAL_VERSION,
 predictedCodes:finalTop5.map(function(x){return x[0];}),
-promotedCodes:(fApplied.promotions||[]).map(function(p){return p.promoted;}),
-patternRules:(fApplied.promotions||[]).map(function(p){return p.pattern&&p.pattern.rule?p.pattern.rule.slice(0,40):'pattern';}),
-watchoutCodes:fWatchouts.map(function(w){return w.code;}),
-regimeAtTime:finalResult.regime?{shifting:finalResult.regime.shifting,note:finalResult.regime.note||''}:null,
+promotedCodes:[],patternRules:[],watchoutCodes:[],
+regimeAtTime:null,
 scores:finalTop5.reduce(function(o,x){o[x[0]]=Math.round(x[1]/fMax*100);return o;},{}),
-signalSnapshot:(function(){var snap={};finalTop5.forEach(function(x){snap[x[0]]=finalResult.snapshots[x[0]]||{};});return snap;})(),
+frozenScores:fNorm,
+frozenSnapshots:compactSnaps,
 weightsAtTime:Object.assign({},finalResult.weights),
 status:'pending',outcome:null,actualDate:null,actualCodes:null,auto:true
 });
@@ -4543,67 +4549,71 @@ saveDB(db);
 onDone(resolvedCount);
 return;
 }
-db=loadDB();
-var trainEntries=entries.slice(0,i+1);
+// Skip liveResolved dates
 var nextEntry=entries[i+1];
 if(liveResolvedDates[nextEntry.date]){
-i++;
-showProgress(letter, i-2, total);
-setTimeout(processStep, 0);
-return;
+i++;showProgress(letter,i-2,total);
+setTimeout(processStep,STEP_DELAY);return;
 }
+// PHASE 1: Score and resolve (fast)
+db=loadDB();
+var trainEntries=entries.slice(0,i+1);
 var currentPreds=shopPreds(letter);
+// Lightweight scoring — skip patterns/watchouts for speed
 var result=buildCombinedScore(trainEntries,currentPreds,letter);
 var top5=Object.entries(result.scores).sort(function(a,b){return b[1]-a[1];}).slice(0,5);
 if(top5.length){
 var top5Max=top5[0][1];
+var avgQty=buildAvgQty(trainEntries);
 var outcome={};
-top5.forEach(function(x){outcome[x[0]]=nextEntry.codes.indexOf(x[0])>-1?'hit':'miss';});
-var slotsCovered=nextEntry.codes.filter(function(c){return top5.some(function(x){return x[0]===c;});}).length;
+top5.forEach(function(x){
+var c=x[0];
+var cnt=nextEntry.codes.filter(function(nc){return nc===c;}).length;
+outcome[c]=cnt===0?'miss':cnt>=Math.round(avgQty[c]||1)?'hit':'partial';
+});
+// Compact snapshots
+var compactSnaps2={};
+Object.keys(result.snapshots||{}).forEach(function(c){
+var snap=result.snapshots[c];if(!snap)return;
+var cs={};Object.keys(snap).forEach(function(k){if(snap[k]>0)cs[k]=Math.round(snap[k]*100);});
+if(Object.keys(cs).length)compactSnaps2[c]=cs;
+});
+var fullMax=Math.max.apply(null,Object.values(result.scores).concat([0.001]));
+var normScores={};
+Object.keys(result.scores).forEach(function(c){normScores[c]=Math.round(result.scores[c]/fullMax*100);});
+var predId2=Date.now();
+saveSnapshot(predId2,compactSnaps2);
 var pred={
-id:i*100000+Date.now()%100000,
-createdDate:trainEntries[trainEntries.length-1].date,
-targetDate:null,
+id:predId2,createdDate:trainEntries[trainEntries.length-1].date,
+modelVersion:SIGNAL_VERSION,
 predictedCodes:top5.map(function(x){return x[0];}),
+promotedCodes:[],patternRules:[],watchoutCodes:[],
+triggeredOutcome:{},regimeAtTime:null,
 scores:top5.reduce(function(o,x){o[x[0]]=Math.round(x[1]/top5Max*100);return o;},{}),
-signalSnapshot:(function(){var snap={};top5.forEach(function(x){snap[x[0]]=result.snapshots[x[0]]||{};});return snap;})(),
+frozenScores:normScores,
+frozenSnapshots:compactSnaps2,
 weightsAtTime:Object.assign({},result.weights),
 status:resolveStatus(outcome),
 outcome:outcome,
-slotsCovered:slotsCovered,
-totalSlots:nextEntry.codes.length,
 actualDate:nextEntry.date,
-actualCodes:Array.from(new Set(nextEntry.codes)).filter(function(c){return outcome[c]==='hit';}),
-auto:true
+actualCodes:nextEntry.codes,
+liveResolved:false,auto:true,
+slotsCovered:nextEntry.codes.filter(function(c){return top5.some(function(x){return x[0]===c;});}).length,
+totalSlots:nextEntry.codes.length
 };
-try{
-var top5Codes=top5.map(function(x){return x[0];});
-var patterns=buildEmergentPatterns(trainEntries,currentPreds);
-var applied=applyEmergentToTop3(top5.slice(),patterns,result.scores);
-pred.promotedCodes=(applied.promotions||[]).map(function(p){return p.promoted;});
-pred.patternRules=(applied.promotions||[]).map(function(p){return p.pattern&&p.pattern.rule?p.pattern.rule.slice(0,40):'pattern';});
-var wo=buildWatchouts(trainEntries,currentPreds,result,top5Codes,letter);
-pred.watchoutCodes=wo.map(function(w){return w.code;});
-pred.regimeAtTime=result.regime?{shifting:result.regime.shifting,note:result.regime.note||''}:null;
-var fullScores=result.scores||{};
-var fullMaxS=Math.max.apply(null,Object.values(fullScores).concat([0.001]));
-var triggeredOutcome={};
-Array.from(new Set(pred.promotedCodes.concat(pred.watchoutCodes).filter(function(c){return top5Codes.indexOf(c)===-1;}))).forEach(function(c){
-triggeredOutcome[c]={appeared:nextEntry.codes.indexOf(c)>-1,type:pred.promotedCodes.indexOf(c)>-1?'promoted':'watchout',scorePct:fullScores[c]?Math.round(fullScores[c]/fullMaxS*100):null};
-});
-pred.triggeredOutcome=triggeredOutcome;
-}catch(e){pred.promotedCodes=[];pred.watchoutCodes=[];pred.triggeredOutcome={};}
 db.shops[letter].predictions.push(pred);
+// Phase 1 save — lightweight
 saveDB(db);
+// PHASE 2: observation window (deferred, runs same step but after save)
 processObservationWindow(letter,pred);
 resolvedCount++;
 }
 i++;
-showProgress(letter, i-2, total);
-setTimeout(processStep, 0);
+showProgress(letter,i-2,total);
+setTimeout(processStep,STEP_DELAY);
 }
-showProgress(letter, 0, total);
-setTimeout(processStep, 0);
+showProgress(letter,0,total);
+setTimeout(processStep,STEP_DELAY);
 }
 
 var rebuildPredictions=function(letter){
