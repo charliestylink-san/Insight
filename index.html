@@ -400,7 +400,6 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:10px 0}
 <div id="toast"></div>
 
 <script>
-'use strict';
 var DB_KEY='inv_intel_v4', DB_BAK='inv_intel_bak', AK_KEY='inv_intel_apikey';
 </script>
 <script>
@@ -4607,7 +4606,7 @@ showProgress(letter, 0, total);
 setTimeout(processStep, 0);
 }
 
-rebuildPredictions=function(letter){
+var rebuildPredictions=function(letter){
   var shops=letter?[letter]:Object.keys(db.shops).sort();
   var idx=0;
   function next(){
