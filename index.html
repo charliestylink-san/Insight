@@ -34,12 +34,11 @@ html,body{
   background:var(--bg);color:var(--text);
   font-family:var(--sans);font-size:14px;line-height:1.5}
 
-/* ── LAYOUT ── */
-#app{display:flex;flex-direction:column;height:100dvh}
-#panels{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:12px 14px calc(14px + env(safe-area-inset-bottom))}
+#app{display:flex;flex-direction:column;height:100dvh;padding-top:env(safe-area-inset-top,44px)}
+#panels{flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:0 0 calc(14px + env(safe-area-inset-bottom))}
 .panel{display:none}
 .panel.active{display:block}
-.panel-inner{/* inline */}
+.panel-inner{padding:12px 14px 0}
 
 /* ── NAV ── */
 /* ── NAV ── */
@@ -3767,15 +3766,17 @@ function restoreSectionStates(){
 function updateAllBanners(){
   renderShopPills();
 }
+
+var activeShop=null;
+var activeTab='data';
+
+var archShowAll=false;
 </script>
 <script>
 // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
 // APP STATE
 // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
 var db={shops:{}};
-var activeShop=null;
-var activeTab='data';
-var archShowAll=false;
 var resolveId=null;
 var resolveState={};
 var confirmCb=null;
