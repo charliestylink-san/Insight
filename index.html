@@ -40,10 +40,11 @@ html,body{
   display:flex;flex-direction:column;
   padding-top:env(safe-area-inset-top,0px);
   background:var(--bg)}
-#panels{flex:1;min-height:0;overflow:hidden;position:relative}
-.panel{position:absolute;inset:0;overflow-y:auto;
+#panels{flex:1;min-height:0;overflow:hidden;position:relative;display:block}
+.panel{display:none;width:100%;height:100%;overflow-y:auto;
   padding:0 0 calc(70px + var(--safe-b));
-  display:none;-webkit-overflow-scrolling:touch}
+  -webkit-overflow-scrolling:touch;
+  position:absolute;top:0;left:0;right:0;bottom:0}
 .panel.active{display:block}
 .panel-inner{padding:12px 14px 0}
 
