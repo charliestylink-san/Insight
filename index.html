@@ -3527,6 +3527,172 @@ return parts.join(' ');
 
 // \u2500\u2500 EXTRA UTILITIES \u2500\u2500
 
+
+function appConfirm(title,body,cb){confirmAction(title,body,cb);}
+function bRate(b){var h=0,t=0;b.forEach(function(p){Object.values(p.outcome).forEach(function(v){t++;if(v==='hit')h++;});});return t?Math.round(h/t*100):null;}
+function fallbackDownload(blob, filename){
+var url=URL.createObjectURL(blob);
+var a=document.createElement('a');
+a.href=url; a.download=filename; a.click();
+var el=document.getElementById('icloud-status');
+if(el) el.innerHTML='<div class="alert alert-info">📥 File downloaded — move it to iCloud Drive in the Files app.</div>';
+}
+function renderArchive(){
+  var el=document.getElementById('archive-list');
+  if(!el) return;
+  db=loadDB();
+  var btn=document.getElementById('arch-toggle-btn');
+  if(btn) btn.textContent=archShowAll?'This Shop':'All Shops Today';
+
+  if(archShowAll){
+    var today=todayStr();
+    var all=[];
+    Object.keys(db.shops).sort().forEach(function(s){
+      (db.shops[s].entries||[]).filter(function(e){return e.date===today;}).forEach(function(e){
+        all.push({shop:s,entry:e});
+      });
+    });
+    if(!all.length){
+      el.innerHTML='<div class="empty"><div class="empty-icon">&#x1F4C2;</div><p>No entries today across any shop</p></div>';
+      return;
+    }
+    el.innerHTML='<div style="font-size:11px;color:var(--muted);margin-bottom:6px">Today across all shops \u2014 '+today+'</div>'
+      +all.map(function(x){
+        return '<div class="entry-row">'
+          +'<span class="entry-date">'+x.shop+'</span>'
+          +'<span class="entry-codes">'+x.entry.codes.join(' ')+'</span>'
+          +'</div>';
+      }).join('');
+    return;
+  }
+
+  if(!activeShop){
+    el.innerHTML='<div class="empty"><p>Select a shop to see entries</p></div>';
+    return;
+  }
+  var entries=shopEntries(activeShop);
+  if(!entries.length){
+    el.innerHTML='<div class="empty"><div class="empty-icon">&#x1F4C2;</div><p>No entries yet for '+activeShop+'</p></div>';
+    return;
+  }
+  el.innerHTML=entries.slice().reverse().map(function(e){
+    return '<div class="entry-row">'
+      +'<span class="entry-date">'+e.date.slice(5)+'</span>'
+      +'<span class="entry-codes">'+e.codes.join(' ')+'</span>'
+      +'<button class="entry-del" onclick="deleteEntry(\''+e.id+'\')" title="Delete">&#x1F5D1;</button>'
+      +'</div>';
+  }).join('');
+}
+function renderLearnerAlert(letter){
+  letter=letter||activeShop;
+  var el=document.getElementById('learner-alert');
+  if(!el) return;
+  db=loadDB();
+  var a=db.shops[letter]&&db.shops[letter].learnerAlert;
+  if(!a||!a.hitGain||a.hitGain<=0){el.style.display='none';return;}
+  el.style.display='block';
+  var boost=(a.topBoost||[]).map(function(s){return (SIGNAL_NAMES[s.k]||s.k)+' &#x2191;';}).join(', ');
+  var reduce=(a.topReduce||[]).map(function(s){return (SIGNAL_NAMES[s.k]||s.k)+' &#x2193;';}).join(', ');
+  var missed=(a.missedOpportunities||[]).map(function(m){return m.code+'('+m.missCount+'\u00D7)';}).join(' ');
+
+  if(a.needsAlert){
+    // ALERT mode \u2014 weights NOT applied, needs review
+    el.innerHTML='<div class="learner-card" style="border-color:var(--gold)">'
+      +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">'
+        +'<span style="font-size:16px">&#x26A0;&#xFE0F;</span>'
+        +'<div>'
+          +'<div style="font-size:12px;font-weight:700;color:var(--gold)">Review suggested before applying</div>'
+          +'<div style="font-size:10px;color:var(--muted)">'+a.alertReason+'</div>'
+        +'</div>'
+      +'</div>'
+      +'<div style="font-size:11px;color:var(--muted);margin-bottom:4px">'
+        +'+'+a.hitGain+' hit'+(a.hitGain>1?'s':'')+' improvement &#xB7; '+a.consistencyPct+'% consistent across '+a.snapshotCount+' refills'
+      +'</div>'
+      +((a.learnedOnly||[]).length?'<div style="font-size:11px;color:var(--muted);margin-bottom:4px">'
+        +'Would add: <span class="mono" style="color:var(--green)">'+(a.learnedOnly||[]).join(' ')+'</span>'
+        +((a.currentOnly||[]).length?' &#xB7; remove: <span class="mono">'+(a.currentOnly||[]).join(' ')+'</span>':'')
+      +'</div>':'')
+      +(missed?'<div style="font-size:10px;color:var(--gold);margin-bottom:6px">Missed codes: '+missed+'</div>':'')
+      +'<div class="btn-row">'
+        +'<button class="btn btn-primary btn-sm" onclick="applyLearnerWeights()">Apply anyway</button>'
+        +'<button class="btn btn-secondary btn-sm" onclick="dismissLearnerAlert()">&#x2715; Skip</button>'
+      +'</div>'
+    +'</div>';
+  } else {
+    // AUTOPILOT mode \u2014 weights already applied, informational
+    el.innerHTML='<div class="learner-card">'
+      +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">'
+        +'<span style="font-size:16px">&#x1F916;</span>'
+        +'<div>'
+          +'<div style="font-size:12px;font-weight:700;color:var(--green)">Model updated \u2014 +'+a.hitGain+' hit'+(a.hitGain>1?'s':'')+' improvement</div>'
+          +'<div style="font-size:10px;color:var(--muted)">'+a.consistencyPct+'% consistent &#xB7; avg +'+a.avgGain+' &#xB7; '+a.snapshotCount+' refills</div>'
+        +'</div>'
+      +'</div>'
+      +((a.learnedOnly||[]).length?'<div style="font-size:11px;color:var(--muted);margin-bottom:4px">'
+        +'Now includes: <span class="mono" style="color:var(--green)">'+(a.learnedOnly||[]).join(' ')+'</span>'
+        +((a.currentOnly||[]).length?' &#xB7; removed: <span class="mono">'+(a.currentOnly||[]).join(' ')+'</span>':'')
+      +'</div>':'')
+      +((boost||reduce)?'<div style="font-size:10px;color:var(--muted);margin-bottom:6px">'
+        +(boost?'<span style="color:var(--green)">'+boost+'</span>':'')
+        +(boost&&reduce?' &#xB7; ':'')
+        +(reduce?'<span style="color:var(--red)">'+reduce+'</span>':'')
+      +'</div>':'')
+      +(missed?'<div style="font-size:10px;color:var(--muted);margin-bottom:6px">Missed codes addressed: '+missed+'</div>':'')
+      +'<div class="btn-row">'
+        +'<button class="btn btn-secondary btn-sm" onclick="rebuildActiveShop()">&#x1F527; Rebuild</button>'
+        +'<button class="btn btn-secondary btn-sm" onclick="undoLearnerUpdate()">&#x21A9; Undo</button>'
+        +'<button class="btn btn-secondary btn-sm" onclick="dismissLearnerAlert()">&#x2715; OK</button>'
+      +'</div>'
+    +'</div>';
+  }
+}
+function renderShopPills(){
+  var el=document.getElementById('shop-pills-inner');
+  if(!el) return;
+  db=loadDB();
+  var shops=Object.keys(db.shops).sort();
+  if(!shops.length){
+    el.innerHTML='<span style="font-size:12px;color:var(--muted)">No shops yet \u2014 tap + to add</span>';
+    return;
+  }
+  el.innerHTML=shops.map(function(s){
+    var shop=db.shops[s];
+    var hasPending=(shop.predictions||[]).some(function(p){return p.status==='pending';});
+    var hasData=(shop.entries||[]).length>0;
+    var cls='shop-pill'+(s===activeShop?' active':'')+(hasData?' has-data':'')+(hasPending?' pending-pred':'');
+    return '<button class="'+cls+'" onclick="selectShop(\''+s+'\')" data-shop="'+s+'">'+s+'</button>';
+  }).join('');
+}
+function saveWeights(letter, w){
+db=loadDB();
+if(!db.shops[letter]) return;
+db.shops[letter].weights = w;
+saveDB(db);
+}
+function shopBaselineHitRate(letter){
+db=loadDB();
+var resolved=shopPreds(letter).filter(function(p){
+return p.status!=='pending'&&p.outcome;
+});
+if(!resolved.length) return 0.5;
+var total=0,hits=0;
+resolved.forEach(function(p){
+Object.values(p.outcome).forEach(function(v){total++;if(v==='hit')hits++;});
+});
+return total>0?hits/total:0.5;
+}
+function showToast(msg,type){
+  var el=document.getElementById('toast');
+  if(!el) return;
+  el.textContent=msg;
+  el.className='show'+(type?' '+type:'');
+  clearTimeout(toastTimer);
+  toastTimer=setTimeout(function(){el.className='';},2800);
+}
+function updateAllBanners(){
+  // No-op in 3-tab design \u2014 kept for engine compatibility
+  renderShopPills();
+}
 </script>
 <script>
 // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
@@ -3557,23 +3723,7 @@ function showTab(tab){
 // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
 // SHOP MANAGEMENT
 // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
-function renderShopPills(){
-  var el=document.getElementById('shop-pills-inner');
-  if(!el) return;
-  db=loadDB();
-  var shops=Object.keys(db.shops).sort();
-  if(!shops.length){
-    el.innerHTML='<span style="font-size:12px;color:var(--muted)">No shops yet \u2014 tap + to add</span>';
-    return;
-  }
-  el.innerHTML=shops.map(function(s){
-    var shop=db.shops[s];
-    var hasPending=(shop.predictions||[]).some(function(p){return p.status==='pending';});
-    var hasData=(shop.entries||[]).length>0;
-    var cls='shop-pill'+(s===activeShop?' active':'')+(hasData?' has-data':'')+(hasPending?' pending-pred':'');
-    return '<button class="'+cls+'" onclick="selectShop(\''+s+'\')" data-shop="'+s+'">'+s+'</button>';
-  }).join('');
-}
+
 
 function selectShop(code){
   activeShop=code;
@@ -3688,52 +3838,7 @@ function renderStorageHealth(){
   }catch(e){}
 }
 
-function renderArchive(){
-  var el=document.getElementById('archive-list');
-  if(!el) return;
-  db=loadDB();
-  var btn=document.getElementById('arch-toggle-btn');
-  if(btn) btn.textContent=archShowAll?'This Shop':'All Shops Today';
 
-  if(archShowAll){
-    var today=todayStr();
-    var all=[];
-    Object.keys(db.shops).sort().forEach(function(s){
-      (db.shops[s].entries||[]).filter(function(e){return e.date===today;}).forEach(function(e){
-        all.push({shop:s,entry:e});
-      });
-    });
-    if(!all.length){
-      el.innerHTML='<div class="empty"><div class="empty-icon">&#x1F4C2;</div><p>No entries today across any shop</p></div>';
-      return;
-    }
-    el.innerHTML='<div style="font-size:11px;color:var(--muted);margin-bottom:6px">Today across all shops \u2014 '+today+'</div>'
-      +all.map(function(x){
-        return '<div class="entry-row">'
-          +'<span class="entry-date">'+x.shop+'</span>'
-          +'<span class="entry-codes">'+x.entry.codes.join(' ')+'</span>'
-          +'</div>';
-      }).join('');
-    return;
-  }
-
-  if(!activeShop){
-    el.innerHTML='<div class="empty"><p>Select a shop to see entries</p></div>';
-    return;
-  }
-  var entries=shopEntries(activeShop);
-  if(!entries.length){
-    el.innerHTML='<div class="empty"><div class="empty-icon">&#x1F4C2;</div><p>No entries yet for '+activeShop+'</p></div>';
-    return;
-  }
-  el.innerHTML=entries.slice().reverse().map(function(e){
-    return '<div class="entry-row">'
-      +'<span class="entry-date">'+e.date.slice(5)+'</span>'
-      +'<span class="entry-codes">'+e.codes.join(' ')+'</span>'
-      +'<button class="entry-del" onclick="deleteEntry(\''+e.id+'\')" title="Delete">&#x1F5D1;</button>'
-      +'</div>';
-  }).join('');
-}
 
 function toggleArchiveAllShops(){
   archShowAll=!archShowAll;
@@ -4155,7 +4260,7 @@ function renderTrackHistory(){
   var col=pct>=60?'var(--green)':pct>=33?'var(--gold)':'var(--red)';
 
   var last5=resolved.slice(-5),prior5=resolved.slice(-10,-5);
-  function bRate(b){var h=0,t=0;b.forEach(function(p){Object.values(p.outcome).forEach(function(v){t++;if(v==='hit')h++;});});return t?Math.round(h/t*100):null;}
+  
   var l5=bRate(last5),p5=bRate(prior5);
   var delta=l5!==null&&p5!==null?l5-p5:null;
 
@@ -4213,69 +4318,7 @@ function renderTrackHistory(){
 // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
 // LEARNER ALERT (Predict tab)
 // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
-function renderLearnerAlert(letter){
-  letter=letter||activeShop;
-  var el=document.getElementById('learner-alert');
-  if(!el) return;
-  db=loadDB();
-  var a=db.shops[letter]&&db.shops[letter].learnerAlert;
-  if(!a||!a.hitGain||a.hitGain<=0){el.style.display='none';return;}
-  el.style.display='block';
-  var boost=(a.topBoost||[]).map(function(s){return (SIGNAL_NAMES[s.k]||s.k)+' &#x2191;';}).join(', ');
-  var reduce=(a.topReduce||[]).map(function(s){return (SIGNAL_NAMES[s.k]||s.k)+' &#x2193;';}).join(', ');
-  var missed=(a.missedOpportunities||[]).map(function(m){return m.code+'('+m.missCount+'\u00D7)';}).join(' ');
 
-  if(a.needsAlert){
-    // ALERT mode \u2014 weights NOT applied, needs review
-    el.innerHTML='<div class="learner-card" style="border-color:var(--gold)">'
-      +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">'
-        +'<span style="font-size:16px">&#x26A0;&#xFE0F;</span>'
-        +'<div>'
-          +'<div style="font-size:12px;font-weight:700;color:var(--gold)">Review suggested before applying</div>'
-          +'<div style="font-size:10px;color:var(--muted)">'+a.alertReason+'</div>'
-        +'</div>'
-      +'</div>'
-      +'<div style="font-size:11px;color:var(--muted);margin-bottom:4px">'
-        +'+'+a.hitGain+' hit'+(a.hitGain>1?'s':'')+' improvement &#xB7; '+a.consistencyPct+'% consistent across '+a.snapshotCount+' refills'
-      +'</div>'
-      +((a.learnedOnly||[]).length?'<div style="font-size:11px;color:var(--muted);margin-bottom:4px">'
-        +'Would add: <span class="mono" style="color:var(--green)">'+(a.learnedOnly||[]).join(' ')+'</span>'
-        +((a.currentOnly||[]).length?' &#xB7; remove: <span class="mono">'+(a.currentOnly||[]).join(' ')+'</span>':'')
-      +'</div>':'')
-      +(missed?'<div style="font-size:10px;color:var(--gold);margin-bottom:6px">Missed codes: '+missed+'</div>':'')
-      +'<div class="btn-row">'
-        +'<button class="btn btn-primary btn-sm" onclick="applyLearnerWeights()">Apply anyway</button>'
-        +'<button class="btn btn-secondary btn-sm" onclick="dismissLearnerAlert()">&#x2715; Skip</button>'
-      +'</div>'
-    +'</div>';
-  } else {
-    // AUTOPILOT mode \u2014 weights already applied, informational
-    el.innerHTML='<div class="learner-card">'
-      +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">'
-        +'<span style="font-size:16px">&#x1F916;</span>'
-        +'<div>'
-          +'<div style="font-size:12px;font-weight:700;color:var(--green)">Model updated \u2014 +'+a.hitGain+' hit'+(a.hitGain>1?'s':'')+' improvement</div>'
-          +'<div style="font-size:10px;color:var(--muted)">'+a.consistencyPct+'% consistent &#xB7; avg +'+a.avgGain+' &#xB7; '+a.snapshotCount+' refills</div>'
-        +'</div>'
-      +'</div>'
-      +((a.learnedOnly||[]).length?'<div style="font-size:11px;color:var(--muted);margin-bottom:4px">'
-        +'Now includes: <span class="mono" style="color:var(--green)">'+(a.learnedOnly||[]).join(' ')+'</span>'
-        +((a.currentOnly||[]).length?' &#xB7; removed: <span class="mono">'+(a.currentOnly||[]).join(' ')+'</span>':'')
-      +'</div>':'')
-      +((boost||reduce)?'<div style="font-size:10px;color:var(--muted);margin-bottom:6px">'
-        +(boost?'<span style="color:var(--green)">'+boost+'</span>':'')
-        +(boost&&reduce?' &#xB7; ':'')
-        +(reduce?'<span style="color:var(--red)">'+reduce+'</span>':'')
-      +'</div>':'')
-      +(missed?'<div style="font-size:10px;color:var(--muted);margin-bottom:6px">Missed codes addressed: '+missed+'</div>':'')
-      +'<div class="btn-row">'
-        +'<button class="btn btn-secondary btn-sm" onclick="rebuildActiveShop()">&#x1F527; Rebuild</button>'
-        +'<button class="btn btn-secondary btn-sm" onclick="undoLearnerUpdate()">&#x21A9; Undo</button>'
-        +'<button class="btn btn-secondary btn-sm" onclick="dismissLearnerAlert()">&#x2715; OK</button>'
-      +'</div>'
-    +'</div>';
-  }
-}
 
 function undoLearnerUpdate(){
   if(!activeShop) return;
@@ -4463,14 +4506,7 @@ function openModal(id){var el=document.getElementById(id);if(el)el.classList.add
 function closeModal(id){var el=document.getElementById(id);if(el)el.classList.remove('open');}
 
 var toastTimer=null;
-function showToast(msg,type){
-  var el=document.getElementById('toast');
-  if(!el) return;
-  el.textContent=msg;
-  el.className='show'+(type?' '+type:'');
-  clearTimeout(toastTimer);
-  toastTimer=setTimeout(function(){el.className='';},2800);
-}
+
 
 function confirmAction(title,body,cb){
   confirmCb=cb;
@@ -4774,10 +4810,11 @@ function saveTextEntry(){
 // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
 // INIT
 // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
-function updateAllBanners(){
-  // No-op in 3-tab design \u2014 kept for engine compatibility
-  renderShopPills();
-}
+
+
+
+
+
 (function init(){
   db=loadDB();
   checkStorageHealth();
