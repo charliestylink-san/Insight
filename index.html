@@ -274,6 +274,9 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:10px 0}
       </div>
 <div class="section-title collapsed" id="sec-title-archive" onclick="toggleSection('archive')">Archive<span class="toggle-icon">&#x25BE;</span></div>
 <div id="sec-archive" class="section-body collapsed" style="max-height:0px">
+      <div style="display:flex;justify-content:flex-end;margin-bottom:6px">
+        <button class="btn btn-secondary btn-sm" id="arch-toggle-btn" onclick="toggleArchiveAllShops()">All Shops Today</button>
+      </div>
       <div id="archive-list"></div>
 
       <!-- ③ Rebuild -->
@@ -299,65 +302,64 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:10px 0}
 
     <!-- ══ PREDICT TAB ══ -->
     <div class="panel" id="panel-predict">
-    <div class="panel-inner">
+<div class="panel-inner">
 
-      <!-- Learner alert -->
-      <div id="learner-alert"></div>
+  <!-- Learner alert -->
+  <div id="learner-alert"></div>
 
-      <!-- ① Signal performance -->
-      </div>
-<div class="section-title collapsed" id="sec-title-signals" onclick="toggleSection('signals')">① Signals<span class="toggle-icon">&#x25BE;</span></div>
-<div id="sec-signals" class="section-body collapsed" style="max-height:0px">
-      <div id="signal-perf-panel"></div>
+  <!-- ① Signals -->
+  <div class="section-title collapsed" id="sec-title-signals" onclick="toggleSection('signals')">&#x2460; Signals<span class="toggle-icon">&#x25BE;</span></div>
+  <div id="sec-signals" class="section-body collapsed" style="max-height:0px">
+    <div id="signal-perf-panel"></div>
+  </div>
 
-      <!-- ② Prediction -->
-      </div>
-<div class="section-title" id="sec-title-predict-codes" onclick="toggleSection('predict-codes')">② Prediction<span class="toggle-icon">&#x25BE;</span></div>
-<div id="sec-predict-codes" class="section-body">
-      <div id="refill-confidence" style="margin-bottom:8px"></div>
-      <div id="plain-english" style="margin-bottom:8px"></div>
-      <div id="prediction-codes"></div>
+  <!-- ② Prediction -->
+  <div class="section-title" id="sec-title-predict-codes" onclick="toggleSection('predict-codes')">&#x2461; Prediction<span class="toggle-icon">&#x25BE;</span></div>
+  <div id="sec-predict-codes" class="section-body">
+    <div id="refill-confidence" style="margin-bottom:8px"></div>
+    <div id="plain-english" style="margin-bottom:8px"></div>
+    <div id="prediction-codes"></div>
+  </div>
 
-      <!-- ③ Pairs -->
-      </div>
-<div class="section-title collapsed" id="sec-title-pairs" onclick="toggleSection('pairs')">③ Pairs<span class="toggle-icon">&#x25BE;</span></div>
-<div id="sec-pairs" class="section-body collapsed" style="max-height:0px">
-      <div id="pairs-panel"></div>
+  <!-- ③ Pairs -->
+  <div class="section-title collapsed" id="sec-title-pairs" onclick="toggleSection('pairs')">&#x2462; Pairs<span class="toggle-icon">&#x25BE;</span></div>
+  <div id="sec-pairs" class="section-body collapsed" style="max-height:0px">
+    <div id="pairs-panel"></div>
+  </div>
 
-    </div>
-    </div><!-- /panel-predict -->
+</div>
+</div><!-- /panel-predict -->
 
     <!-- ══ TRACK TAB ══ -->
     <div class="panel" id="panel-track">
-    <div class="panel-inner">
+<div class="panel-inner">
 
-      <!-- ① Score / Confidence -->
-      </div>
-<div class="section-title" id="sec-title-track-score" onclick="toggleSection('track-score')">① Score · Confidence<span class="toggle-icon">&#x25BE;</span></div>
-<div id="sec-track-score" class="section-body">
-      <div id="track-score-panel"></div>
+  <!-- ① Score / Confidence -->
+  <div class="section-title" id="sec-title-track-score" onclick="toggleSection('track-score')">&#x2460; Score &middot; Confidence<span class="toggle-icon">&#x25BE;</span></div>
+  <div id="sec-track-score" class="section-body">
+    <div id="track-score-panel"></div>
+  </div>
 
-      <!-- ② Hit/Miss profile -->
-      </div>
-<div class="section-title" id="sec-title-track-hits" onclick="toggleSection('track-hits')">② Hit · Miss Profile<span class="toggle-icon">&#x25BE;</span></div>
-<div id="sec-track-hits" class="section-body">
-      <div id="track-accuracy-chart" style="margin-bottom:8px"></div>
-      <div id="track-history"></div>
+  <!-- ② Hit/Miss profile -->
+  <div class="section-title" id="sec-title-track-hits" onclick="toggleSection('track-hits')">&#x2461; Hit &middot; Miss Profile<span class="toggle-icon">&#x25BE;</span></div>
+  <div id="sec-track-hits" class="section-body">
+    <div id="track-accuracy-chart" style="margin-bottom:8px"></div>
+    <div id="track-history"></div>
+  </div>
 
-      <!-- ③ Optimize -->
-      </div>
-<div class="section-title collapsed" id="sec-title-optimize" onclick="toggleSection('optimize')">③ Optimize · Anchor<span class="toggle-icon">&#x25BE;</span></div>
-<div id="sec-optimize" class="section-body collapsed" style="max-height:0px">
-      <div id="best-pred-list" style="margin-bottom:8px"></div>
-      <div class="btn-row" style="margin-bottom:8px">
-        <button class="btn btn-primary btn-sm" onclick="optimizeWeights()">📈 Update Signal Weights</button>
-        <button class="btn btn-secondary btn-sm" onclick="resetToCurrentWeights()">↩ Reset to Current</button>
-      </div>
-      <div id="optimize-status" style="margin-bottom:4px"></div>
-      <div id="optimize-result"></div>
-
+  <!-- ③ Optimize -->
+  <div class="section-title collapsed" id="sec-title-optimize" onclick="toggleSection('optimize')">&#x2462; Optimize &middot; Anchor<span class="toggle-icon">&#x25BE;</span></div>
+  <div id="sec-optimize" class="section-body collapsed" style="max-height:0px">
+    <div id="best-pred-list" style="margin-bottom:8px"></div>
+    <div class="btn-row" style="margin-bottom:8px">
+      <button class="btn btn-primary btn-sm" onclick="optimizeWeights()">&#x1F4C8; Update Signal Weights</button>
+      <button class="btn btn-secondary btn-sm" onclick="resetToCurrentWeights()">&#x21A9; Reset to Current</button>
     </div>
-    </div>
+    <div id="optimize-status" style="margin-bottom:4px"></div>
+    <div id="optimize-result"></div>
+  </div>
+
+</div>
 </div><!-- /panel-track -->
 
   </div><!-- /panels -->
