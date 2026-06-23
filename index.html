@@ -3826,17 +3826,25 @@ function renderPredictTab(){
       });
     return;
   }
-
-  var result=buildCombinedScore(entries,preds,activeShop);
-  var scores=result.scores;
-  var snaps=result.snapshots;
-  var weights=result.weights;
-
-  renderSignalPerf(weights,preds,snaps,scores);
-  renderConfidenceScore(entries,preds,result);
-  renderPredictionCodes(result,entries,preds);
-  renderPairs(entries);
-  renderLearnerAlert(activeShop);
+  try{
+    var result=buildCombinedScore(entries,preds,activeShop);
+    var scores=result.scores;
+    var snaps=result.snapshots;
+    var weights=result.weights;
+    if(!scores||!Object.keys(scores).length){
+      document.getElementById('prediction-codes').innerHTML=
+        '<div class="alert alert-warn">No scores returned for '+activeShop+' ('+entries.length+' entries)</div>';
+      return;
+    }
+    renderSignalPerf(weights,preds,snaps,scores);
+    renderConfidenceScore(entries,preds,result);
+    renderPredictionCodes(result,entries,preds);
+    renderPairs(entries);
+    renderLearnerAlert(activeShop);
+  }catch(e){
+    var el=document.getElementById('prediction-codes');
+    if(el) el.innerHTML='<div class="alert alert-err">Predict error: '+e.message+'</div>';
+  }
 }
 
 function renderSignalPerf(weights,preds,snaps,scores){
@@ -4043,9 +4051,9 @@ function renderTrackTab(){
     return;
   }
   db=loadDB();
-  renderTrackScore();
-  renderTrackHistory();
-  renderBestPredList();
+  try{ renderTrackScore(); }catch(e){ document.getElementById('track-score-panel').innerHTML='<div class="alert alert-err">Score error: '+e.message+'</div>'; }
+  try{ renderTrackHistory(); }catch(e){ document.getElementById('track-history').innerHTML='<div class="alert alert-err">History error: '+e.message+'</div>'; }
+  try{ renderBestPredList(); }catch(e){}
 }
 
 function renderTrackScore(){
