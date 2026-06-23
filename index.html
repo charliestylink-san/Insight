@@ -67,8 +67,8 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
 .section-title .toggle-icon{font-size:10px;color:var(--muted);margin-left:2px;
   transition:transform .2s;flex-shrink:0}
 .section-title.collapsed .toggle-icon{transform:rotate(-90deg)}
-.section-body{overflow:hidden;transition:max-height .25s ease}
-.section-body.collapsed{max-height:0!important}
+.section-body{transition:max-height .25s ease}
+.section-body.collapsed{max-height:0!important;overflow:hidden}
 
 /* ── CARD ── */
 .card{background:var(--surface);border:1px solid var(--border);
@@ -300,6 +300,9 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:10px 0}
 
   <!-- Learner alert -->
   <div id="learner-alert"></div>
+
+  <!-- Diagnostic - always visible -->
+  <div id="predict-diag" style="font-size:11px;color:var(--muted);padding:4px 0;margin-bottom:4px"></div>
 
   <!-- ① Signals -->
   <div class="section-title collapsed" id="sec-title-signals" onclick="toggleSection('signals')">&#x2460; Signals<span class="toggle-icon">&#x25BE;</span></div>
@@ -3985,6 +3988,8 @@ function handleImportFile(evt){
 // PREDICT TAB
 // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
 function renderPredictTab(){
+  var diag=document.getElementById('predict-diag');
+  if(diag) diag.textContent='renderPredictTab called · shop='+activeShop;
   if(!activeShop){
     ['signal-perf-panel','refill-confidence','plain-english','prediction-codes','pairs-panel']
       .forEach(function(id){
@@ -3996,6 +4001,7 @@ function renderPredictTab(){
   db=loadDB();
   var entries=shopEntries(activeShop);
   var preds=shopPreds(activeShop);
+  if(diag) diag.textContent=activeShop+' · '+entries.length+' entries · '+preds.length+' preds';
   if(entries.length<3){
     ['signal-perf-panel','refill-confidence','prediction-codes','pairs-panel']
       .forEach(function(id){
