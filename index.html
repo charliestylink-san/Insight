@@ -3169,6 +3169,8 @@ qtystreak:qs2[c]||0
 });
 p.surpriseSnapshot=surpriseSnap;
 p.surpriseCodes=surpriseCodes;
+// Save surprise snapshots to external store keyed by pred id
+saveSnapshot(p.id+'-surp', surpriseSnap);
 }}
 // ── SEQUENCE: freeze → compare → save new prediction → THEN learn ──
 // codeSignalLifts updated by runBackgroundLearner AFTER new prediction is saved
@@ -3347,31 +3349,9 @@ fallbackDownload(blob, filename);
 }
 }
 
-function renderAutoBackupToggle(){
-var btn=document.getElementById('auto-backup-toggle');
-if(!btn) return;
-var on=isAutoBackupOn();
-btn.textContent=on?'ON':'OFF';
-btn.style.background=on?'var(--green)':'var(--surface2)';
-btn.style.color=on?'#0d1a12':'var(--muted)';
-btn.style.border=on?'none':'1px solid var(--border)';
-}
 
-function showBackupReminder(){
-if(!isAutoBackupOn()) return;
-var old=document.getElementById('backup-reminder');
-if(old) old.remove();
-var div=document.createElement('div');
-div.id='backup-reminder';
-div.className='alert alert-info';
-div.style.marginBottom='12px';
-div.innerHTML='☁️ Don\'t forget to back up. '
-+'<strong onclick="saveToiCloud();this.parentElement.parentElement.remove()" '
-+'style="cursor:pointer;text-decoration:underline">Save to iCloud now →</strong>'
-+' <span onclick="this.parentElement.remove()" style="float:right;cursor:pointer;opacity:.6">✕</span>';
-var firstCard=document.querySelector('#panel-collect .card');
-if(firstCard) firstCard.parentNode.insertBefore(div, firstCard);
-}
+
+
 
 function clearShopData(){
 if(!activeShop) return;
@@ -3421,7 +3401,107 @@ saveDB(db);
 var i=2;
 var resolvedCount=0;
 var total=entries.length-2;
-
+function processStep(){
+if(i>=entries.length-1){
+db=loadDB();
+var allEntries=(db.shops[letter].entries||[]).slice().sort(function(a,b){return a.date.localeCompare(b.date);});
+if(allEntries.length>=3){
+if(livePendingToKeep){
+db.shops[letter].predictions.push(livePendingToKeep);
+saveDB(db);
+} else {
+var allPreds=shopPreds(letter);
+var finalResult=buildCombinedScore(allEntries,allPreds,letter);
+var finalTop5=Object.entries(finalResult.scores).sort(function(a,b){return b[1]-a[1];}).slice(0,5);
+if(finalTop5.length){
+var fMax=finalTop5[0][1];
+var fPatterns=buildEmergentPatterns(allEntries,allPreds);
+var fApplied=applyEmergentToTop3(finalTop5.slice(),fPatterns,finalResult.scores);
+var fWatchouts=buildWatchouts(allEntries,allPreds,finalResult,finalTop5.map(function(x){return x[0];}),letter);
+var fFullMax=Math.max.apply(null,Object.values(finalResult.scores).concat([0.001]));
+var fNorm={};
+Object.keys(finalResult.scores).forEach(function(c){fNorm[c]=Math.round(finalResult.scores[c]/fFullMax*100);});
+db.shops[letter].lastFullScores=fNorm;
+db.shops[letter].predictions.push({
+id:Date.now(),
+createdDate:allEntries[allEntries.length-1].date,
+targetDate:null,
+predictedCodes:finalTop5.map(function(x){return x[0];}),
+promotedCodes:(fApplied.promotions||[]).map(function(p){return p.promoted;}),
+patternRules:(fApplied.promotions||[]).map(function(p){return p.pattern&&p.pattern.rule?p.pattern.rule.slice(0,40):'pattern';}),
+watchoutCodes:fWatchouts.map(function(w){return w.code;}),
+regimeAtTime:finalResult.regime?{shifting:finalResult.regime.shifting,note:finalResult.regime.note||''}:null,
+scores:finalTop5.reduce(function(o,x){o[x[0]]=Math.round(x[1]/fMax*100);return o;},{}),
+signalSnapshot:(function(){var snap={};finalTop5.forEach(function(x){snap[x[0]]=finalResult.snapshots[x[0]]||{};});return snap;})(),
+weightsAtTime:Object.assign({},finalResult.weights),
+status:'pending',outcome:null,actualDate:null,actualCodes:null,auto:true
+});
+saveDB(db);
+}
+}
+}
+onDone(resolvedCount);
+return;
+}
+db=loadDB();
+var trainEntries=entries.slice(0,i+1);
+var nextEntry=entries[i+1];
+if(liveResolvedDates[nextEntry.date]){
+i++;
+showProgress(letter, i-2, total);
+setTimeout(processStep, 0);
+return;
+}
+var currentPreds=shopPreds(letter);
+var result=buildCombinedScore(trainEntries,currentPreds,letter);
+var top5=Object.entries(result.scores).sort(function(a,b){return b[1]-a[1];}).slice(0,5);
+if(top5.length){
+var top5Max=top5[0][1];
+var outcome={};
+top5.forEach(function(x){outcome[x[0]]=nextEntry.codes.indexOf(x[0])>-1?'hit':'miss';});
+var slotsCovered=nextEntry.codes.filter(function(c){return top5.some(function(x){return x[0]===c;});}).length;
+var pred={
+id:i*100000+Date.now()%100000,
+createdDate:trainEntries[trainEntries.length-1].date,
+targetDate:null,
+predictedCodes:top5.map(function(x){return x[0];}),
+scores:top5.reduce(function(o,x){o[x[0]]=Math.round(x[1]/top5Max*100);return o;},{}),
+signalSnapshot:(function(){var snap={};top5.forEach(function(x){snap[x[0]]=result.snapshots[x[0]]||{};});return snap;})(),
+weightsAtTime:Object.assign({},result.weights),
+status:resolveStatus(outcome),
+outcome:outcome,
+slotsCovered:slotsCovered,
+totalSlots:nextEntry.codes.length,
+actualDate:nextEntry.date,
+actualCodes:Array.from(new Set(nextEntry.codes)).filter(function(c){return outcome[c]==='hit';}),
+auto:true
+};
+try{
+var top5Codes=top5.map(function(x){return x[0];});
+var patterns=buildEmergentPatterns(trainEntries,currentPreds);
+var applied=applyEmergentToTop3(top5.slice(),patterns,result.scores);
+pred.promotedCodes=(applied.promotions||[]).map(function(p){return p.promoted;});
+pred.patternRules=(applied.promotions||[]).map(function(p){return p.pattern&&p.pattern.rule?p.pattern.rule.slice(0,40):'pattern';});
+var wo=buildWatchouts(trainEntries,currentPreds,result,top5Codes,letter);
+pred.watchoutCodes=wo.map(function(w){return w.code;});
+pred.regimeAtTime=result.regime?{shifting:result.regime.shifting,note:result.regime.note||''}:null;
+var fullScores=result.scores||{};
+var fullMaxS=Math.max.apply(null,Object.values(fullScores).concat([0.001]));
+var triggeredOutcome={};
+Array.from(new Set(pred.promotedCodes.concat(pred.watchoutCodes).filter(function(c){return top5Codes.indexOf(c)===-1;}))).forEach(function(c){
+triggeredOutcome[c]={appeared:nextEntry.codes.indexOf(c)>-1,type:pred.promotedCodes.indexOf(c)>-1?'promoted':'watchout',scorePct:fullScores[c]?Math.round(fullScores[c]/fullMaxS*100):null};
+});
+pred.triggeredOutcome=triggeredOutcome;
+}catch(e){pred.promotedCodes=[];pred.watchoutCodes=[];pred.triggeredOutcome={};}
+db.shops[letter].predictions.push(pred);
+saveDB(db);
+processObservationWindow(letter,pred);
+resolvedCount++;
+}
+i++;
+showProgress(letter, i-2, total);
+setTimeout(processStep, 0);
+}
 showProgress(letter, 0, total);
 setTimeout(processStep, 0);
 }
@@ -3541,488 +3621,9 @@ caption:'last '+last5.length+' predictions'};
 
 
 
-function showRefillResultAlert(result, actualCodes, date){
-var old=document.getElementById('refill-result-alert');
-if(old) old.remove();
-if(!result||!result.hadPrediction){
-db=loadDB();
-var entries=shopEntries(activeShop);
-if(entries.length>=3){
-var nudge=document.createElement('div');
-nudge.id='refill-result-alert';
-nudge.className='alert alert-info';
-nudge.style.marginBottom='12px';
-nudge.innerHTML='💡 No pending prediction for this refill. A new prediction has been saved for next time.';
-var fc=document.querySelector('#panel-collect .card');
-if(fc) fc.parentNode.insertBefore(nudge,fc);
-}
-showWhatNextCard(actualCodes, date, null);
-return;
-}
-var diag    = result.diagnostics&&result.diagnostics[0]||null;
-var pred    = result.resolved[0];
-var hitCodes    = diag?diag.hitCodes  :pred.predictedCodes.filter(function(c){return pred.outcome[c]==='hit';});
-var missedCodes = diag?diag.missedCodes:pred.predictedCodes.filter(function(c){return pred.outcome[c]==='miss';});
-var partialCodes= diag?diag.partialCodes:pred.predictedCodes.filter(function(c){return pred.outcome[c]==='partial';});
-var hitRate =Math.round(hitCodes.length/pred.predictedCodes.length*100);
-var statusIcon  =pred.status==='hit'?'✅':pred.status==='partial'?'⚡':'❌';
-var statusLabel =pred.status==='hit'?'All 3 codes appeared':pred.status==='partial'?'Some codes appeared':'No predicted codes appeared';
-var alertCls    =pred.status==='hit'?'alert-success':pred.status==='partial'?'alert-warn':'alert-error';
-var codesHtml='<div style="display:flex;flex-wrap:wrap;gap:5px;margin:8px 0">';
-pred.predictedCodes.forEach(function(c){
-var st=pred.outcome[c];
-var col=st==='hit'?'hit':st==='partial'?'partial':'miss';
-var icon=st==='hit'?'✓':st==='partial'?'~':'✗';
-codesHtml+='<span class="tag '+col+'" style="font-size:13px">'+c+' '+icon+'</span>';
-});
-codesHtml+='</div>';
-var uniqueSurprise=Array.from(new Set(actualCodes.filter(function(c){return pred.predictedCodes.indexOf(c)===-1;})));
-var surpriseHtml='';
-if(uniqueSurprise.length){
-db=loadDB();
-var entries=shopEntries(activeShop);
-var preds2=shopPreds(activeShop);
-var bcsResult2=buildCombinedScore(entries,preds2,activeShop);
-var allScores=bcsResult2.scores;
-var ranked2=Object.entries(allScores).sort(function(a,b){return b[1]-a[1];});
-var maxS2=ranked2.length?ranked2[0][1]:0.001;
-var rankMap={};
-ranked2.forEach(function(x,i){rankMap[x[0]]=i+1;});
-surpriseHtml='<div style="border-top:1px solid rgba(255,255,255,.15);margin-top:10px;padding-top:10px">'
-+'<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;opacity:.8">🎯 SURPRISE HITS — Arrived but not predicted</div>';
-uniqueSurprise.forEach(function(c){
-var rank=rankMap[c]||null;
-var scorePct=allScores[c]?Math.round(allScores[c]/maxS2*100):0;
-var snap=bcsResult2.snapshots[c]||{};
-var w=bcsResult2.weights||{};
-var topSigs=SIGNAL_KEYS.map(function(k){
-return {k:k,val:snap[k]||0,contrib:(snap[k]||0)*(w[k]||DEFAULT_WEIGHTS[k])};
-}).sort(function(a,b){return b.contrib-a.contrib;}).slice(0,3);
-var topSig=topSigs[0];
-var sigCol=topSig?getSignalColor(topSig.k):'var(--accent)';
-var thresh=buildScoreThreshold(c,entries,preds2);
-var aboveThresh=thresh&&scorePct>=thresh.thresholdPct;
-var codeResolved=preds2.filter(function(p){return p.status!=='pending'&&p.outcome&&p.predictedCodes.indexOf(c)>-1;});
-var codeHits=codeResolved.filter(function(p){return p.outcome[c]==='hit';}).length;
-var codeHitRate=codeResolved.length?Math.round(codeHits/codeResolved.length*100):null;
-var codeStates=entries.length>=4?classifyCodeStates(entries):{};
-var state=codeStates[c]?codeStates[c].state:'active';
-var stateBadge=state==='emerging'?'<span style="font-size:9px;background:rgba(232,121,249,.2);color:var(--sig-momentum);padding:1px 5px;border-radius:6px;font-weight:700">↑ EMERGING</span>'
-:state==='fading'?'<span style="font-size:9px;background:rgba(247,95,95,.15);color:var(--red);padding:1px 5px;border-radius:6px;font-weight:700">↓ FADING</span>':'';
-var whyMissed='';
-if(rank&&rank<=8){
-whyMissed='Ranked #'+rank+' overall — just outside top-5. Score '+scorePct+'%.';
-} else if(scorePct<20){
-whyMissed='Low historical signal (score '+scorePct+'%). Insufficient data or infrequent code.';
-} else {
-whyMissed='Ranked #'+(rank||'?')+'. Score '+scorePct+'% was outweighed by top-5 codes.';
-}
-var watchSignal=topSig?'Strongest signal: <span style="color:'+getSignalColor(topSig.k)+'">'+getSignalName(topSig.k)+'</span> ('+topSig.val.toFixed(2)+')':'';
-var implication='';
-if(rank&&rank<=6){
-implication='Near miss — this code was close to making the top-5. One more refill with this code may push it in.';
-} else if(state==='emerging'){
-implication='Emerging code — Momentum signal will increase its score as it appears in more recent refills.';
-} else if(codeHitRate!==null&&codeHitRate>=50){
-implication='Historical hit rate is '+codeHitRate+'% — this code has proven reliable when predicted. Weight adaptation will boost it.';
-} else {
-implication='Score and history suggest this was a genuine surprise. Watch next refill for pattern.';
-}
-surpriseHtml+='<div style="padding:8px;margin-bottom:6px;background:rgba(62,207,142,.06);border:1px solid rgba(62,207,142,.2);border-radius:8px">'
-+'<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px">'
-+'<span style="font-family:var(--mono);font-weight:900;font-size:16px;color:var(--green)">'+c+'</span>'
-+'<span style="font-size:10px;padding:1px 6px;background:rgba(62,207,142,.15);color:var(--green);border-radius:8px;font-weight:700">HIT ✓</span>'
-+stateBadge
-+'<span style="font-size:10px;color:rgba(255,255,255,.4);margin-left:auto">rank #'+(rank||'?')+' · score '+scorePct+'%</span>'
-+'</div>'
-+(thresh
-?'<div style="position:relative;margin-bottom:6px">'
-+'<div style="height:5px;background:rgba(255,255,255,.1);border-radius:3px;overflow:hidden">'
-+'<div style="width:'+scorePct+'%;height:100%;background:'+sigCol+'"></div>'
-+'</div>'
-+'<div style="position:relative;height:0">'
-+'<div style="position:absolute;left:'+Math.min(thresh.thresholdPct,98)+'%;top:-8px;width:2px;height:8px;background:var(--gold)"></div>'
-+'</div>'
-+'<div style="font-size:9px;color:rgba(255,255,255,.35);margin-top:4px">score '+(aboveThresh?'▲ above':'▼ below')+' threshold ('+thresh.thresholdPct+'%)</div>'
-+'</div>'
-:'')
-+'<div style="font-size:11px;color:rgba(255,255,255,.55);margin-bottom:3px">'+whyMissed+'</div>'
-+(watchSignal?'<div style="font-size:11px;margin-bottom:3px">'+watchSignal+'</div>':'')
-+'<div style="font-size:11px;color:rgba(62,207,142,.75);font-style:italic">→ '+implication+'</div>'
-+'</div>';
-});
-if(uniqueSurprise.length){
-db=loadDB();
-var sgChanges=applySurpriseGradient(activeShop,uniqueSurprise,shopEntries(activeShop));
-if(sgChanges.length){
-console.log('Surprise gradient applied:',sgChanges.map(function(c){return c.code+':'+c.signal;}).join(','));
-}
-}
-surpriseHtml+='<div style="font-size:10px;color:rgba(255,255,255,.35);margin-top:4px">'
-+'Surprise hits update bias scores AND apply targeted signal gradient — the signal strongest for each surprise code gets a targeted weight boost.'
-+'</div>';
-}
-var slotPct=diag?diag.slotCoverage:(pred.totalSlots>0?Math.round(pred.slotsCovered/pred.totalSlots*100):0);
-var diagHtml='';
-if(diag&&diag.codeDiags.length){
-diagHtml='<div style="border-top:1px solid rgba(255,255,255,.15);margin-top:10px;padding-top:10px">'
-+'<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;opacity:.8">🔍 Why it missed</div>';
-diag.codeDiags.forEach(function(cd){
-var sev=cd.severity;
-var sevCol=sev==='first'?'rgba(255,255,255,.5)':sev==='second'?'var(--gold)':'var(--red)';
-diagHtml+='<div style="margin-bottom:8px;padding:8px;background:rgba(0,0,0,.2);border-radius:8px">'
-+'<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">'
-+'<span style="font-family:var(--mono);font-weight:800;font-size:15px">'+cd.code+'</span>'
-+'<span style="font-size:10px;padding:2px 6px;border-radius:8px;background:rgba(0,0,0,.3);color:'+sevCol+';">'
-+(sev==='first'?'1st miss':sev==='second'?'2nd miss':'miss #'+cd.consecMisses)+'</span>'
-+(cd.dominantLabel?'<span style="font-size:10px;color:rgba(255,255,255,.5)">driven by '+cd.dominantLabel+'</span>':'')
-+'</div>'
-+'<div style="font-size:11px;color:rgba(255,255,255,.7);line-height:1.5">'+cd.implication+'</div>'
-+'</div>';
-});
-diagHtml+='<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin:8px 0 4px;opacity:.8">⚙️ What just changed</div>';
-diag.changes.forEach(function(ch){
-diagHtml+='<div style="font-size:11px;color:rgba(255,255,255,.65);padding:2px 0">→ '+ch+'</div>';
-});
-diagHtml+='</div>';
-}
-var btHtml='';
-db=loadDB();
-var abt=(db.shops[activeShop]||{}).lastAutoBacktest;
-if(abt&&abt.result&&(pred.status==='miss'||pred.status==='partial')){
-var r=abt.result;
-var health=r.health||'fair';
-var btCol=health==='good'?'var(--green)':health==='fair'?'var(--gold)':'var(--red)';
-var btMsg=health==='good'
-?'Model signal is strong — this miss is likely an outlier. Continue monitoring.'
-:health==='fair'
-?'Model accuracy is moderate. The pattern may be evolving — add more recent refills.'
-:'Model accuracy is low. The shop pattern may have shifted significantly. Consider adding 5+ recent refills to recalibrate.';
-var recommendation=health==='poor'
-?'<div style="font-size:11px;margin-top:5px;padding:5px 8px;background:rgba(0,0,0,.2);border-radius:6px;color:rgba(255,255,255,.8)">💡 Recommendation: enter the last 5 recent refills if not already done, then run DATA → 🔧 Rebuild Predictions to recalibrate the model.</div>'
-:'';
-btHtml='<div style="border-top:1px solid rgba(255,255,255,.15);margin-top:10px;padding-top:10px">'
-+'<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px;opacity:.8">🧪 Auto-Backtest</div>'
-+'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px">'
-+'<span style="font-size:12px;opacity:.8">Slot coverage on held-out refills</span>'
-+'<span style="font-family:var(--mono);font-weight:800;font-size:16px;color:'+btCol+'">'+r.overallPct+'%</span>'
-+'</div>'
-+'<div style="font-size:11px;opacity:.7">'+btMsg+'</div>'
-+recommendation
-+'</div>';
-}
-var attrHtml='';
-if(diag&&pred&&(diag.missedCodes.length||diag.partialCodes.length)){
-var attrItems=[];
-diag.missedCodes.forEach(function(code){
-var attr=buildMissAttribution(code,shopEntries(activeShop),shopPreds(activeShop),pred);
-var thresh=buildScoreThreshold(code,shopEntries(activeShop),shopPreds(activeShop));
-if(attr) attrItems.push({code:code,attr:attr,thresh:thresh});
-});
-if(attrItems.length){
-attrHtml='<div style="border-top:1px solid rgba(255,255,255,.15);margin-top:10px;padding-top:10px">'
-+'<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;opacity:.8">🔎 MISS ATTRIBUTION</div>';
-attrItems.forEach(function(item){
-var attr=item.attr, thresh=item.thresh;
-var causeIcon={
-cycle:'🔄', regime_shift:'⚡', below_threshold:'📊',
-counter_predictive_signal:'⚠️', momentum_fade:'↓', unexplained:'❓'
-}[attr.cause]||'ℹ️';
-var causeLabel={
-cycle:'Cycle timing (expected miss)',
-regime_shift:'Regime shift — historical signals stale',
-below_threshold:'Score below hit threshold',
-counter_predictive_signal:'Counter-predictive signal',
-momentum_fade:'Momentum fading',
-unexplained:'Random variation'
-}[attr.cause]||attr.cause;
-var causeCol={
-cycle:'rgba(34,211,238,.85)',
-regime_shift:'rgba(245,158,11,.85)',
-below_threshold:'rgba(107,114,128,.85)',
-counter_predictive_signal:'rgba(247,95,95,.85)',
-momentum_fade:'rgba(232,121,249,.85)',
-unexplained:'rgba(255,255,255,.5)'
-}[attr.cause]||'rgba(255,255,255,.5)';
-attrHtml+='<div style="margin-bottom:10px;padding:8px;background:rgba(0,0,0,.2);border-radius:8px;border-left:3px solid '+causeCol+'">'
-+'<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px">'
-+'<span style="font-family:var(--mono);font-weight:900;font-size:15px;color:rgba(247,95,95,.9)">'+attr.code+'</span>'
-+'<span style="font-size:10px;font-weight:700;padding:1px 7px;border-radius:8px;background:rgba(0,0,0,.3);color:'+causeCol+'">'+causeIcon+' '+causeLabel+'</span>'
-+'<span style="font-size:10px;color:rgba(255,255,255,.4);margin-left:auto">score: '+attr.scorePct+'%'+(attr.topSig?' · '+getSignalName(attr.topSig.k):'')+' · miss #'+attr.consecMisses+'</span>'
-+'</div>'
-+'<div style="font-size:11px;color:rgba(255,255,255,.65);line-height:1.5;margin-bottom:4px">'+attr.explanation+'</div>'
-+'<div style="font-size:11px;color:rgba(255,255,255,.4);font-style:italic">'+attr.action+'</div>';
-if(thresh){
-var thCol=thresh.reliability==='proven'?'rgba(62,207,142,.8)':thresh.reliability==='emerging'?'rgba(245,158,11,.8)':'rgba(107,114,128,.7)';
-attrHtml+='<div style="margin-top:6px;padding:5px 8px;background:rgba(0,0,0,.15);border-radius:6px">'
-+'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px">'
-+'<span style="font-size:10px;font-weight:700;color:'+thCol+'">📊 Hit threshold: '+thresh.thresholdPct+'%</span>'
-+'<span style="font-size:9px;color:rgba(255,255,255,.4)">'+thresh.totalPreds+' predictions</span>'
-+'</div>'
-+(thresh.hitRateAbove!==null
-?'<div style="font-size:10px;color:rgba(255,255,255,.5)">Above threshold: <span style="color:rgba(62,207,142,.8)">'+thresh.hitRateAbove+'% hit</span> (n='+thresh.aboveN+') · Below: <span style="color:rgba(247,95,95,.7)'+'">'+( thresh.hitRateBelowThreshold||0)+'%</span> (n='+thresh.belowN+')</div>'
-:'')
-+(thresh.lowScoreHitsNote
-?'<div style="font-size:10px;color:rgba(245,158,11,.7);margin-top:2px">⚠️ '+thresh.lowScoreHitsNote+'</div>'
-:'')
-+'</div>';
-}
-attrHtml+='</div>';
-});
-attrHtml+='</div>';
-}
-}
-var obsHtml='';
-if(diag&&diag.obsResult){
-obsHtml=renderObsWindowSection(diag.obsResult);
-}
-var debrief=null;
-if(diag&&pred){
-db=loadDB();
-var abt2=(db.shops[activeShop]||{}).lastAutoBacktest;
-var btRes=abt2&&abt2.result?abt2.result:null;
-debrief=buildModelDebrief(activeShop,pred,diag.weightDeltas||[],btRes);
-}
-var debriefHtml='';
-if(debrief){
-var sigLabels={freq:'Frequency',recency:'Recency',streak:'Streak',
-bias:'Pred. accuracy',cooccur:'Co-occurrence',interval:'Interval',
-dow:'Day-of-week',cycle:'Cycle',overdue:'Overdue',
-qtydom:'Qty dominance',qtystreak:'Qty streak'};
-debriefHtml='<div style="border-top:1px solid rgba(255,255,255,.15);margin-top:10px;padding-top:10px">'
-+'<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;opacity:.8">🧬 WHAT THE MODEL LEARNED</div>';
-if(debrief.strongSignals.length){
-debriefHtml+='<div style="font-size:11px;color:rgba(72,199,142,.9);margin-bottom:3px">✅ Signals that worked: '
-+debrief.strongSignals.map(function(k){return sigLabels[k];}).join(', ')+'</div>';
-}
-if(debrief.weakSignals.length){
-debriefHtml+='<div style="font-size:11px;color:rgba(247,95,95,.9);margin-bottom:3px">❌ Signals that failed: '
-+debrief.weakSignals.map(function(k){return sigLabels[k];}).join(', ')+'</div>';
-}
-if(debrief.wDeltaLines.length){
-debriefHtml+='<div style="font-size:11px;font-weight:700;opacity:.7;margin:7px 0 4px">⚖️ Weight adjustments</div>';
-debrief.wDeltaLines.forEach(function(d){
-var col=d.dir==='up'?'rgba(72,199,142,.8)':'rgba(247,95,95,.8)';
-var arrow=d.dir==='up'?'▲':'▼';
-debriefHtml+='<div style="font-size:11px;display:flex;justify-content:space-between;padding:2px 0;opacity:.85">'
-+'<span style="color:'+col+'">'+arrow+' '+d.label+'</span>'
-+'<span style="font-family:var(--mono);color:'+col+'">'+d.from+'% → '+d.to+'% ('+(d.delta>0?'+':'')+d.delta+'%)</span>'
-+'</div>';
-});
-}
-if(debrief.implications.length){
-debriefHtml+='<div style="font-size:11px;font-weight:700;opacity:.7;margin:7px 0 4px">🔭 Implications</div>';
-debrief.implications.forEach(function(imp){
-var col=imp.type==='positive'?'rgba(72,199,142,.85)'
-:imp.type==='warning'?'rgba(255,179,71,.85)'
-:imp.type==='danger'?'rgba(247,95,95,.85)'
-:'rgba(255,255,255,.6)';
-debriefHtml+='<div style="font-size:11px;color:'+col+';padding:3px 0;line-height:1.5;border-bottom:1px solid rgba(255,255,255,.08)">'+imp.text+'</div>';
-});
-}
-debriefHtml+='</div>';
-}
-var alert=document.createElement('div');
-alert.id='refill-result-alert';
-alert.className='alert '+alertCls;
-alert.style.marginBottom='12px';
-alert.innerHTML=
-'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">'
-+'<strong style="font-size:14px">'+statusIcon+' '+statusLabel+'</strong>'
-+'<span style="font-family:var(--mono);font-weight:800;font-size:16px">'+hitCodes.length+'/'+pred.predictedCodes.length+'</span>'
-+'</div>'
-+'<div style="font-size:11px;opacity:.8;margin-bottom:2px">'+date+' · Code hit rate: '+hitRate+'% · Slot coverage: '+slotPct+'%</div>'
-+codesHtml
-+surpriseHtml
-+diagHtml
-+attrHtml
-+btHtml
-+obsHtml
-+debriefHtml;
-var firstCard=document.querySelector('#panel-collect .card');
-if(firstCard) firstCard.parentNode.insertBefore(alert,firstCard);
-showWhatNextCard(actualCodes, date, pred.status);
-}
 
-function showWhatNextCard(actualCodes, date, predStatus){
-var old=document.getElementById('whats-next-card');
-if(old) old.remove();
-if(!activeShop) return;
-db=loadDB();
-var entries=shopEntries(activeShop);
-if(entries.length<3) return;
-var preds=shopPreds(activeShop);
-var bcsResult=buildCombinedScore(entries,preds,activeShop);
-var scores=bcsResult.scores;
-var ranked=Object.entries(scores).sort(function(a,b){return b[1]-a[1];});
-var maxS=ranked[0]?ranked[0][1]:1;
-var patterns=buildEmergentPatterns(entries,preds);
-var emergent=applyEmergentToTop3(ranked.slice(0,5),patterns,scores);
-var top3=emergent.top3;
-var promotions=emergent.promotions;
-var freq=buildFreqMap(entries);
-var rates=buildAppearanceRate(entries);
-var streaks=buildStreaks(entries);
-var bias=buildBias(preds);
-var overdueMap=buildOverdueScore(entries);
-var qtydomMap=buildQtyDominance(entries);
-var missPen=buildMissStreakPenalty(preds,activeShop);
-var medals=['🥇','🥈','🥉','4️⃣','5️⃣'];
-var top3Html=top3.map(function(x,i){
-var c=x[0],sc=x[1],promoted=x[2]===true;
-var pct=Math.round(sc/maxS*100);
-var reasons=[];
-if(promoted){
-var promo=promotions.find(function(p){return p.promoted===c;});
-reasons.push('🔬 Pattern: '+(promo?promo.pattern.rule:'emergent rule triggered'));
-} else {
-var streak=streaks[c]||0;
-if(streak>=2) reasons.push('🔥 '+streak+'-refill streak');
-if(qtydomMap[c]&&qtydomMap[c]>=0.65) reasons.push('📊 High quantity avg');
-if(overdueMap[c]&&overdueMap[c]>=0.5) reasons.push('⏰ Overdue');
-if(bias[c]!==undefined&&bias[c]>=0.6) reasons.push('🎯 '+(Math.round(bias[c]*100))+'% hit rate');
-if(missPen[c]!==undefined&&missPen[c]<0.85) reasons.push('⚠️ Miss penalty '+Math.round((1-missPen[c])*100)+'%');
-if(!reasons.length) reasons.push(Math.round((rates[c]||0)*100)+'% appearance rate');
-}
-var medalCol=i===0?'var(--gold)':i===1?'var(--accent)':'var(--accent2)';
-return '<div style="padding:8px 0;border-bottom:1px solid var(--border)">'
-+'<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">'
-+'<span style="font-size:16px">'+medals[i]+'</span>'
-+'<span style="font-family:var(--mono);font-weight:900;font-size:18px;color:'+medalCol+'">'+c+'</span>'
-+(promoted?'<span style="font-size:10px;background:var(--green);color:#000;padding:1px 6px;border-radius:8px;font-weight:700">PROMOTED</span>':'')
-+'<span style="font-size:12px;font-family:var(--mono);color:var(--muted);margin-left:auto">'+pct+'%</span>'
-+'</div>'
-+'<div style="font-size:11px;color:var(--muted);padding-left:24px">'+reasons.join(' · ')+'</div>'
-+'</div>';
-}).join('');
-var watchList=[];
-patterns.filter(function(p){return p.triggered&&p.confidence>=0.60;}).forEach(function(p){
-p.impliedCodes.forEach(function(c){
-if(!top3.some(function(x){return x[0]===c;})&&watchList.indexOf(c)===-1){
-watchList.push({c:c,reason:'🔬 Pattern triggered: '+p.rule,col:'var(--accent)'});
-}
-});
-});
-Object.entries(overdueMap).filter(function(x){return x[1]>=0.6;}).forEach(function(x){
-var c=x[0];
-if(!top3.some(function(t){return t[0]===c;})&&!watchList.some(function(w){return w.c===c;})){
-var total=0,hits=0;
-preds.filter(function(p){return p.status!=='pending'&&p.outcome&&p.predictedCodes.indexOf(c)>-1;})
-.forEach(function(p){
-var snap=p.signalSnapshot&&p.signalSnapshot[c];
-if(snap&&(snap.overdue||0)>=0.4){total++;if(p.outcome[c]==='hit')hits++;}
-});
-var provenRate=total>=2?Math.round(hits/total*100):null;
-var bl=Math.round(shopBaselineHitRate(activeShop)*100);
-if(provenRate!==null&&provenRate>=bl+15){
-watchList.push({c:c,reason:'⏰ Overdue (proven '+provenRate+'% hit rate when overdue vs '+bl+'% baseline)',col:'var(--gold)'});
-}
-}
-});
-var qtyStr=buildQtyStreak(entries);
-Object.entries(qtyStr).filter(function(x){return x[1]>=0.5;}).forEach(function(x){
-var c=x[0];
-if(!top3.some(function(t){return t[0]===c;})&&!watchList.some(function(w){return w.c===c;})){
-var total=0,hits=0;
-preds.filter(function(p){return p.status!=='pending'&&p.outcome&&p.predictedCodes.indexOf(c)>-1;})
-.forEach(function(p){
-var snap=p.signalSnapshot&&p.signalSnapshot[c];
-if(snap&&(snap.qtystreak||0)>=0.4){total++;if(p.outcome[c]==='hit')hits++;}
-});
-var provenRate=total>=2?Math.round(hits/total*100):null;
-var bl=Math.round(shopBaselineHitRate(activeShop)*100);
-if(provenRate!==null&&provenRate>=bl+15){
-watchList.push({c:c,reason:'📈 Qty streak (proven '+provenRate+'% when streak active) — '+Math.round(x[1]*4)+' consecutive 2+ slot refills',col:'var(--sig-qtystreak)'});
-}
-}
-});
-var codeStateMap=entries.length>=4?classifyCodeStates(entries):{};
-Object.entries(codeStateMap).filter(function(x){return x[1].state==='emerging';}).forEach(function(x){
-var c=x[0];
-if(!top3.some(function(t){return t[0]===c;})&&!watchList.some(function(w){return w.c===c;})){
-watchList.push({c:c,reason:'↑ Emerging — appearing more frequently in recent refills',col:'var(--sig-momentum)'});
-}
-});
-var watchHtml='';
-if(watchList.length){
-watchHtml='<div style="margin-top:12px">'
-+'<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">👀 WATCH LIST</div>'
-+watchList.slice(0,4).map(function(w){
-return '<div style="display:flex;align-items:flex-start;gap:8px;padding:5px 0;border-bottom:1px solid var(--border)">'
-+'<span style="font-family:var(--mono);font-weight:800;font-size:14px;color:'+w.col+';min-width:28px">'+w.c+'</span>'
-+'<span style="font-size:11px;color:var(--muted);line-height:1.5">'+w.reason+'</span>'
-+'</div>';
-}).join('')
-+'</div>';
-}
-var calHtml='';
-db=loadDB();
-var allPreds=shopPreds(activeShop);
-var resolved=allPreds.filter(function(p){return p.status!=='pending'&&p.outcome;});
-if(resolved.length>=3){
-var recent5=resolved.slice(-5);
-var totalCodes=0,hitC=0,slotCovTotal=0,slotTotal=0;
-recent5.forEach(function(p){
-Object.values(p.outcome).forEach(function(v){totalCodes++;if(v==='hit')hitC++;});
-slotCovTotal+=(p.slotsCovered||0);
-slotTotal+=(p.totalSlots||0);
-});
-var recentHitRate=totalCodes>0?Math.round(hitC/totalCodes*100):0;
-var recentSlotCov=slotTotal>0?Math.round(slotCovTotal/slotTotal*100):0;
-var trust=recentHitRate>=60&&recentSlotCov>=40?'high'
-:recentHitRate>=30||recentSlotCov>=20?'moderate':'low';
-var trustCol=trust==='high'?'var(--green)':trust==='moderate'?'var(--gold)':'var(--red)';
-var trustMsg=trust==='high'?'Model is well-calibrated. Trust this prediction.'
-:trust==='moderate'?'Model is learning. Use prediction as a guide.'
-:'Model accuracy is low. Check Analyze → Lessons Learned.';
-var currentW=getWeights(activeShop);
-var topW=SIGNAL_KEYS.slice().sort(function(a,b){return currentW[b]-currentW[a];}).slice(0,2);
-var sigLabelsShort={freq:'Freq',recency:'Recency',streak:'Streak',bias:'Accuracy',
-cooccur:'Co-occur',interval:'Interval',dow:'Day-of-wk',cycle:'Cycle',
-overdue:'Overdue',qtydom:'Qty dom',qtystreak:'Qty streak'};
-calHtml='<div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">'
-+'<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">📡 MODEL STATUS</div>'
-+'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">'
-+'<span style="font-size:12px;color:var(--muted)">Confidence (last 5 predictions)</span>'
-+'<span style="font-size:12px;font-weight:700;color:'+trustCol+'">'+trust.toUpperCase()+'</span>'
-+'</div>'
-+'<div style="display:flex;gap:12px;font-size:11px;color:var(--muted);margin-bottom:4px">'
-+'<span>Code hit rate: <strong style="color:'+trustCol+'">'+recentHitRate+'%</strong></span>'
-+'<span>Slot coverage: <strong style="color:'+trustCol+'">'+recentSlotCov+'%</strong></span>'
-+'</div>'
-+'<div style="font-size:11px;color:var(--muted);margin-bottom:4px">'+trustMsg+'</div>'
-+'<div style="font-size:11px;color:var(--muted)">Leading signals: '
-+topW.map(function(k){return '<strong style="color:var(--accent)">'+sigLabelsShort[k]+'</strong> '+Math.round(currentW[k]*100)+'%';}).join(' · ')
-+'</div>'
-+'</div>';
-}
-var top5Codes = top3.map(function(x){return x[0];});
-var watchouts = buildWatchouts(entries, preds, bcsResult, top5Codes, activeShop);
-var watchoutsHtml = renderWatchoutsHtml(watchouts);
-var card=document.createElement('div');
-card.id='whats-next-card';
-card.className='card';
-card.style.cssText='margin-bottom:12px;border:2px solid var(--accent)';
-card.innerHTML=
-'<div class="card-title" style="color:var(--accent)">🔮 WHAT\'S NEXT — Refill #'+entries.length+'+1</div>'
-+'<div style="font-size:11px;color:var(--muted);margin-bottom:10px;line-height:1.5">'
-+'Updated using all '+(entries.length)+' refills'
-+(promotions.length?' · '+promotions.length+' code'+(promotions.length>1?'s':'')+' promoted by emergent pattern'+(promotions.length>1?'s':''):'')
-+'</div>'
-+top3Html
-+watchHtml
-+watchoutsHtml
-+calHtml;
-var firstCard=document.querySelector('#panel-collect .card');
-if(firstCard) firstCard.parentNode.insertBefore(card,firstCard);
-var persistEl=document.getElementById('whats-next-persistent');
-if(persistEl){
-persistEl.style.display='block';
-persistEl.innerHTML=card.innerHTML;
-persistEl.className='card';
-persistEl.style.cssText='border:2px solid var(--accent);margin-top:12px';
-}
-}
+
+
 
 function renderTagGrid(id,codes){
 var el=document.getElementById(id); el.innerHTML='';
@@ -5108,10 +4709,11 @@ function predCardHTML(pred, canResolve, trainEntries, trainPreds){
     var scorePct=maxScore>0?Math.round((allScores[c]||0)/maxScore*100):0;
 
     // Grade uses frozen snapshot + training-time data only
-    var frozenSnap=pred.frozenSnapshots&&pred.frozenSnapshots[c];
-    var rawSnap=frozenSnap
-      ?Object.keys(frozenSnap).reduce(function(o,k){o[k]=(frozenSnap[k]||0)/100;return o;},{})
-      :(pred.signalSnapshot&&pred.signalSnapshot[c]||{});
+    // Use getSnapshotForPred for complete snapshot (inline + external store)
+    var allPredSnap=getSnapshotForPred(pred);
+    var isCompactSnap=!!(pred.frozenSnapshots&&pred.modelVersion);
+    var decompAllSnap=decompressSnap(allPredSnap,isCompactSnap);
+    var rawSnap=decompAllSnap[c]||{};
     var grade=te.length>=3?buildCodeConfidenceGrade(c,rawSnap,wts,te,tp,activeShop,scorePct):{grade:'—',col:'var(--muted)'};
 
     var divider=i>0&&allCodes[i-1].type==='top5'&&type!=='top5'
