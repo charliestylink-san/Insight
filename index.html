@@ -65,12 +65,16 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
 #add-shop-btn{font-size:18px;padding:0 8px;background:none;border:none;
   color:var(--muted);cursor:pointer;line-height:1;align-self:center}
 
-/* ── SECTION ── */
-.section{margin-bottom:16px}
+/* ── COLLAPSIBLE SECTIONS ── */
 .section-title{font-size:10px;font-weight:700;color:var(--muted);
   letter-spacing:.8px;text-transform:uppercase;padding:8px 0 6px;
-  display:flex;align-items:center;gap:8px}
+  display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none}
 .section-title::after{content:'';flex:1;height:1px;background:var(--border)}
+.section-title .toggle-icon{font-size:10px;color:var(--muted);margin-left:2px;
+  transition:transform .2s;flex-shrink:0}
+.section-title.collapsed .toggle-icon{transform:rotate(-90deg)}
+.section-body{overflow:hidden;transition:max-height .25s ease}
+.section-body.collapsed{max-height:0!important}
 
 /* ── CARD ── */
 .card{background:var(--surface);border:1px solid var(--border);
@@ -229,7 +233,8 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:10px 0}
     <div class="panel-inner">
 
       <!-- ① Backup / Import -->
-      <div class="section-title">① Backup · Import</div>
+      <div class="section-title" id="sec-title-backup" onclick="toggleSection('backup')">① Backup · Import<span class="toggle-icon">&#x25BE;</span></div>
+<div id="sec-backup" class="section-body">
 
       <div id="icloud-status"></div>
       <div class="btn-row" style="margin-bottom:10px">
@@ -241,11 +246,15 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:10px 0}
       <div id="backup-result"></div>
 
       <!-- Shop management -->
-      <div class="section-title">Shops</div>
+      </div>
+<div class="section-title" id="sec-title-shops" onclick="toggleSection('shops')">Shops<span class="toggle-icon">&#x25BE;</span></div>
+<div id="sec-shops" class="section-body">
       <div id="shop-manage-list"></div>
 
       <!-- ② Collect / Archive -->
-      <div class="section-title">② Collect</div>
+      </div>
+<div class="section-title" id="sec-title-collect" onclick="toggleSection('collect')">② Collect<span class="toggle-icon">&#x25BE;</span></div>
+<div id="sec-collect" class="section-body">
 
       <div style="margin-bottom:8px">
         <div class="input-label">Date</div>
@@ -262,14 +271,15 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:10px 0}
       </div>
 
       <!-- Archive -->
-      <div class="section-title">Archive
-        <button class="btn btn-secondary btn-sm" style="margin-left:auto"
-          id="arch-toggle-btn" onclick="toggleArchiveAllShops()">All Shops Today</button>
       </div>
+<div class="section-title collapsed" id="sec-title-archive" onclick="toggleSection('archive')">Archive<span class="toggle-icon">&#x25BE;</span></div>
+<div id="sec-archive" class="section-body collapsed" style="max-height:0px">
       <div id="archive-list"></div>
 
       <!-- ③ Rebuild -->
-      <div class="section-title">③ Rebuild</div>
+      </div>
+<div class="section-title" id="sec-title-rebuild" onclick="toggleSection('rebuild')">③ Rebuild<span class="toggle-icon">&#x25BE;</span></div>
+<div id="sec-rebuild" class="section-body">
       <div style="margin-bottom:8px">
         <div id="storage-health-bar" style="margin-bottom:8px"></div>
         <div class="btn-row">
@@ -295,17 +305,23 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:10px 0}
       <div id="learner-alert"></div>
 
       <!-- ① Signal performance -->
-      <div class="section-title">① Signals</div>
+      </div>
+<div class="section-title collapsed" id="sec-title-signals" onclick="toggleSection('signals')">① Signals<span class="toggle-icon">&#x25BE;</span></div>
+<div id="sec-signals" class="section-body collapsed" style="max-height:0px">
       <div id="signal-perf-panel"></div>
 
       <!-- ② Prediction -->
-      <div class="section-title">② Prediction</div>
+      </div>
+<div class="section-title" id="sec-title-predict-codes" onclick="toggleSection('predict-codes')">② Prediction<span class="toggle-icon">&#x25BE;</span></div>
+<div id="sec-predict-codes" class="section-body">
       <div id="refill-confidence" style="margin-bottom:8px"></div>
       <div id="plain-english" style="margin-bottom:8px"></div>
       <div id="prediction-codes"></div>
 
       <!-- ③ Pairs -->
-      <div class="section-title">③ Pairs</div>
+      </div>
+<div class="section-title collapsed" id="sec-title-pairs" onclick="toggleSection('pairs')">③ Pairs<span class="toggle-icon">&#x25BE;</span></div>
+<div id="sec-pairs" class="section-body collapsed" style="max-height:0px">
       <div id="pairs-panel"></div>
 
     </div>
@@ -316,16 +332,22 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:10px 0}
     <div class="panel-inner">
 
       <!-- ① Score / Confidence -->
-      <div class="section-title">① Score · Confidence</div>
+      </div>
+<div class="section-title" id="sec-title-track-score" onclick="toggleSection('track-score')">① Score · Confidence<span class="toggle-icon">&#x25BE;</span></div>
+<div id="sec-track-score" class="section-body">
       <div id="track-score-panel"></div>
 
       <!-- ② Hit/Miss profile -->
-      <div class="section-title">② Hit · Miss Profile</div>
+      </div>
+<div class="section-title" id="sec-title-track-hits" onclick="toggleSection('track-hits')">② Hit · Miss Profile<span class="toggle-icon">&#x25BE;</span></div>
+<div id="sec-track-hits" class="section-body">
       <div id="track-accuracy-chart" style="margin-bottom:8px"></div>
       <div id="track-history"></div>
 
       <!-- ③ Optimize -->
-      <div class="section-title">③ Optimize · Anchor</div>
+      </div>
+<div class="section-title collapsed" id="sec-title-optimize" onclick="toggleSection('optimize')">③ Optimize · Anchor<span class="toggle-icon">&#x25BE;</span></div>
+<div id="sec-optimize" class="section-body collapsed" style="max-height:0px">
       <div id="best-pred-list" style="margin-bottom:8px"></div>
       <div class="btn-row" style="margin-bottom:8px">
         <button class="btn btn-primary btn-sm" onclick="optimizeWeights()">📈 Update Signal Weights</button>
@@ -335,7 +357,8 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:10px 0}
       <div id="optimize-result"></div>
 
     </div>
-    </div><!-- /panel-track -->
+    </div>
+</div><!-- /panel-track -->
 
   </div><!-- /panels -->
 
@@ -3544,6 +3567,24 @@ function renderArchive(){
   var btn=document.getElementById('arch-toggle-btn');
   if(btn) btn.textContent=archShowAll?'This Shop':'All Shops Today';
 
+  // Update section title with counts
+  var titleEl=document.getElementById('sec-title-archive');
+  if(titleEl){
+    var countStr='';
+    if(archShowAll){
+      var today=todayStr();
+      var todayTotal=0;
+      Object.keys(db.shops).forEach(function(s){
+        todayTotal+=(db.shops[s].entries||[]).filter(function(e){return e.date===today;}).length;
+      });
+      countStr=' <span style="color:var(--accent);font-weight:900">'+todayTotal+' today</span>';
+    } else if(activeShop&&db.shops[activeShop]){
+      var n=(db.shops[activeShop].entries||[]).length;
+      countStr=' <span style="color:var(--accent);font-weight:900">'+n+'</span>';
+    }
+    titleEl.innerHTML='Archive'+countStr+'<span class="toggle-icon">&#x25BE;</span>';
+  }
+
   if(archShowAll){
     var today=todayStr();
     var all=[];
@@ -3689,8 +3730,40 @@ function showToast(msg,type){
   clearTimeout(toastTimer);
   toastTimer=setTimeout(function(){el.className='';},2800);
 }
+function toggleSection(id){
+  var body=document.getElementById('sec-'+id);
+  var title=document.getElementById('sec-title-'+id);
+  if(!body||!title) return;
+  var isCollapsed=body.classList.contains('collapsed');
+  if(isCollapsed){
+    body.style.maxHeight=body.scrollHeight+'px';
+    body.classList.remove('collapsed');
+    title.classList.remove('collapsed');
+    setTimeout(function(){body.style.maxHeight='';},260);
+  } else {
+    body.style.maxHeight=body.scrollHeight+'px';
+    setTimeout(function(){
+      body.style.maxHeight='0px';
+      body.classList.add('collapsed');
+      title.classList.add('collapsed');
+    },10);
+  }
+  try{var st=JSON.parse(localStorage.getItem('sec_state')||'{}');
+    st[id]=isCollapsed; localStorage.setItem('sec_state',JSON.stringify(st));}catch(e){}
+}
+function restoreSectionStates(){
+  try{
+    var st=JSON.parse(localStorage.getItem('sec_state')||'{}');
+    Object.keys(st).forEach(function(id){
+      if(!st[id]){
+        var body=document.getElementById('sec-'+id);
+        var title=document.getElementById('sec-title-'+id);
+        if(body&&title){body.classList.add('collapsed');body.style.maxHeight='0px';title.classList.add('collapsed');}
+      }
+    });
+  }catch(e){}
+}
 function updateAllBanners(){
-  // No-op in 3-tab design \u2014 kept for engine compatibility
   renderShopPills();
 }
 </script>
@@ -4721,7 +4794,11 @@ function predCardHTML(pred, canResolve, trainEntries, trainPreds){
   var te=trainEntries||[];
   var tp=trainPreds||[];
 
-  var pills=allCodes.map(function(entry,i){
+  // Split codes into top5 and extra (promoted/watchout/surprise)
+  var top5Pills=allCodes.filter(function(x){return x.type==='top5';});
+  var extraCodes=allCodes.filter(function(x){return x.type!=='top5';});
+
+  function makeRow(entry,i,allArr){
     var c=entry.c, type=entry.type;
     var outcome=pred.outcome?pred.outcome[c]:null;
     if(!outcome&&pred.triggeredOutcome&&pred.triggeredOutcome[c]) outcome=pred.triggeredOutcome[c].appeared?'hit':'miss';
@@ -4730,21 +4807,15 @@ function predCardHTML(pred, canResolve, trainEntries, trainPreds){
     var outcomeCol=isHit?'var(--green)':isMiss?'var(--red)':'var(--muted)';
     var icon=isHit?'&#x2713;':isMiss?'&#x2717;':'&#xB7;';
     var scorePct=maxScore>0?Math.round((allScores[c]||0)/maxScore*100):0;
-
-    // Grade uses frozen snapshot + training-time data only
-    // Use getSnapshotForPred for complete snapshot (inline + external store)
     var allPredSnap=getSnapshotForPred(pred);
     var isCompactSnap=!!(pred.frozenSnapshots&&pred.modelVersion);
     var decompAllSnap=decompressSnap(allPredSnap,isCompactSnap);
     var rawSnap=decompAllSnap[c]||{};
     var grade=te.length>=3?buildCodeConfidenceGrade(c,rawSnap,wts,te,tp,activeShop,scorePct):{grade:'\u2014',col:'var(--muted)'};
-
-    var divider=i>0&&allCodes[i-1].type==='top5'&&type!=='top5'
-      ?'<div class="pred-divider"></div>':'';
-
-    return divider+'<div style="display:flex;align-items:center;gap:5px;padding:3px 0">'
+    var codeColor=type==='top5'?(isHit?'var(--green)':isMiss?'var(--red)':'var(--text)'):typeCol[type];
+    return '<div style="display:flex;align-items:center;gap:5px;padding:3px 0">'
       +(typeIcon[type]?'<span style="font-size:10px;min-width:16px">'+typeIcon[type]+'</span>':'<span style="min-width:16px"></span>')
-      +'<span class="mono" style="font-size:13px;font-weight:900;min-width:28px;color:'+(outcome?outcomeCol:typeCol[type])+'">'+c+'</span>'
+      +'<span class="mono" style="font-size:13px;font-weight:900;min-width:28px;color:'+codeColor+'">'+c+'</span>'
       +(outcome?'<span style="font-size:11px;font-weight:700;color:'+outcomeCol+'">'+icon+'</span>':'<span style="min-width:12px"></span>')
       +'<span style="font-size:10px;font-weight:900;font-family:var(--mono);color:'+grade.col+'">['+grade.grade+']</span>'
       +'<div style="flex:1;height:4px;background:var(--surface3);border-radius:2px;overflow:hidden">'
@@ -4752,13 +4823,36 @@ function predCardHTML(pred, canResolve, trainEntries, trainPreds){
       +'</div>'
       +'<span style="font-size:10px;font-family:var(--mono);color:var(--muted);min-width:28px;text-align:right">'+scorePct+'%</span>'
       +'</div>';
-  }).join('');
+  }
+
+  var top5Html=top5Pills.map(function(e,i){return makeRow(e,i,top5Pills);}).join('');
+
+  // Extra codes collapsible
+  var extraHtml='';
+  if(extraCodes.length){
+    var uid='ex-'+pred.id;
+    var extraRows=extraCodes.map(function(e,i){return makeRow(e,i,extraCodes);}).join('');
+    var extraLabel=[];
+    var nPromo=extraCodes.filter(function(x){return x.type==='promoted';}).length;
+    var nWatch=extraCodes.filter(function(x){return x.type==='watchout';}).length;
+    var nSurp=extraCodes.filter(function(x){return x.type==='surprise';}).length;
+    if(nPromo) extraLabel.push('&#x1F52C;'+nPromo);
+    if(nWatch) extraLabel.push('&#x26A0;'+nWatch);
+    if(nSurp)  extraLabel.push('&#x1F3AF;'+nSurp);
+    extraHtml='<div style="border-top:1px dashed var(--border);margin-top:4px">'
+      +'<div onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display===\'none\'?\'block\':\'none\';this.querySelector(\'.xarrow\').textContent=this.nextElementSibling.style.display===\'none\'?\'&#x25BE;\':\'&#x25B4;\'" '
+      +'style="display:flex;align-items:center;gap:6px;padding:4px 0;cursor:pointer;color:var(--muted);font-size:10px;font-weight:700">'
+      +extraLabel.join(' ')
+      +'<span class="xarrow" style="margin-left:auto">&#x25BE;</span>'
+      +'</div>'
+      +'<div style="display:none">'+extraRows+'</div>'
+      +'</div>';
+  }
 
   var top5H=pred.predictedCodes?(pred.predictedCodes.filter(function(c){return pred.outcome&&pred.outcome[c]==='hit';}).length):0;
   var top5T=pred.predictedCodes?pred.predictedCodes.length:0;
   var hRate=top5T?Math.round(top5H/top5T*100):0;
   var hCol=hRate===100?'var(--green)':hRate>=40?'var(--gold)':'var(--red)';
-
   var statusCol=sColors[pred.status]||'var(--muted)';
   var dateStr=(pred.actualDate||pred.createdDate||'').slice(5);
 
@@ -4768,7 +4862,8 @@ function predCardHTML(pred, canResolve, trainEntries, trainPreds){
       +'<span style="font-size:12px;font-weight:700;color:'+statusCol+'">'+sLabels[pred.status]+'</span>'
       +(pred.outcome?'<span class="mono" style="font-size:12px;font-weight:900;color:'+hCol+'">'+hRate+'%</span>':'')
     +'</div>'
-    +pills
+    +top5Html
+    +extraHtml
     +(canResolve?'<button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="openResolveModal(\''+pred.id+'\')">Resolve</button>':'')
     +'</div>';
 }
@@ -4822,6 +4917,7 @@ function saveTextEntry(){
   var d=document.getElementById('entry-date');
   if(d) d.value=todayStr();
   renderShopPills();
+  restoreSectionStates();
   var shops=Object.keys(db.shops).sort();
   if(shops.length){
     selectShop(shops[0]);
