@@ -3839,7 +3839,7 @@ function renderPredictTab(){
     renderSignalPerf(weights,preds,snaps,scores);
     renderConfidenceScore(entries,preds,result);
     renderPredictionCodes(result,entries,preds);
-    renderPairs(entries);
+    renderPairs(entries,scores);
     renderLearnerAlert(activeShop);
   }catch(e){
     var el=document.getElementById('prediction-codes');
@@ -3988,7 +3988,7 @@ function renderPredictionCodes(result,entries,preds){
   el.innerHTML=html||'<div class="empty"><p>No prediction available</p></div>';
 }
 
-function renderPairs(entries){
+function renderPairs(entries, scores){
   var el=document.getElementById('pairs-panel');
   if(!el) return;
   if(entries.length<5){
@@ -3997,7 +3997,6 @@ function renderPairs(entries){
   }
 
   var tight=buildTightCooccurrence(entries);
-  var cooccur=buildCooccurrence(entries);
   var n=entries.length;
 
   // Top tight pairs
@@ -4022,15 +4021,23 @@ function renderPairs(entries){
     }).join('');
   }
 
-  // Co-occurrence implications
-  var impls=buildCooccurImplications(entries);
+  // Co-occurrence implications — pass top5Codes derived from scores
+  var top5Codes=scores?Object.entries(scores).sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];}):[];
+  if(!top5Codes.length){
+    // Fallback: use most frequent codes
+    var freq={};
+    entries.forEach(function(e){e.codes.forEach(function(c){freq[c]=(freq[c]||0)+1;});});
+    top5Codes=Object.entries(freq).sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];});
+  }
+  var impls=buildCooccurImplications(entries,top5Codes);
   if(impls&&impls.length){
     html+='<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin:10px 0 6px">Implications (if A &#x2192; likely B)</div>';
     html+=impls.slice(0,6).map(function(r){
+      // buildCooccurImplications returns {impliedCode, via, rate, reverseRate, tight}
       return '<div class="pair-row">'
-        +'<span class="pair-codes">'+r.if+'</span>'
-        +'<span class="pair-meta">&#x2192; '+r.then+'</span>'
-        +'<span class="pair-pct" style="color:var(--accent)">'+Math.round(r.confidence*100)+'%</span>'
+        +'<span class="pair-codes">'+r.via+'</span>'
+        +'<span class="pair-meta">&#x2192; '+r.impliedCode+'</span>'
+        +'<span class="pair-pct" style="color:var(--accent)">'+r.rate+'%</span>'
         +'</div>';
     }).join('');
   }
