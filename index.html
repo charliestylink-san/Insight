@@ -3916,7 +3916,8 @@ function renderConfidenceScore(entries,preds,result){
   // Plain English
   var pe=document.getElementById('plain-english');
   if(pe){
-    var peText=buildPlainEnglishSummary(entries,preds,activeShop,result);
+    var top5CodesForSummary=Object.entries(result.scores).sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];});
+    var peText=buildPlainEnglishSummary(entries,preds,top5CodesForSummary,result,activeShop);
     pe.innerHTML=peText?'<div style="font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:6px">'+peText+'</div>':'';
   }
 }
@@ -3933,8 +3934,12 @@ function renderPredictionCodes(result,entries,preds){
   var ranked=Object.entries(scores).sort(function(a,b){return b[1]-a[1];});
   var top5=ranked.slice(0,5);
   var top5Codes=top5.map(function(x){return x[0];});
-  var promoted=result.promotions||[];
-  var watchouts=result.watchouts||[];
+  // Build promotions via applyEmergentToTop3
+  var patterns=buildEmergentPatterns(entries,preds)||[];
+  var appliedResult=applyEmergentToTop3(top5.slice(),patterns,scores);
+  var promoted=appliedResult.promotions||[];
+  // Build watchouts: (entries, predictions, bcsResult, top5Codes, letter)
+  var watchouts=buildWatchouts(entries,preds,result,top5Codes,activeShop)||[];
 
   var lt=db.shops[activeShop]&&db.shops[activeShop].learnedThresholds||null;
 
