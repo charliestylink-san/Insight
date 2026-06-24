@@ -299,8 +299,6 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:10px 0}
   <!-- Learner alert -->
   <div id="learner-alert"></div>
 
-  <!-- Diagnostic - always visible -->
-  <div id="predict-diag" style="font-size:11px;color:var(--muted);padding:4px 0;margin-bottom:4px"></div>
 
   <!-- ① Signals -->
   <div class="section-title collapsed" id="sec-title-signals" onclick="toggleSection('signals')">&#x2460; Signals<span class="toggle-icon">&#x25BE;</span></div>
@@ -341,8 +339,8 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:10px 0}
   </div>
 
   <!-- ③ Optimize -->
-  <div class="section-title collapsed" id="sec-title-optimize" onclick="toggleSection('optimize')">&#x2462; Optimize &middot; Anchor<span class="toggle-icon">&#x25BE;</span></div>
-  <div id="sec-optimize" class="section-body collapsed" style="max-height:0px">
+  <div class="section-title" id="sec-title-optimize" onclick="toggleSection('optimize')">&#x2462; Optimize &middot; Anchor<span class="toggle-icon">&#x25BE;</span></div>
+  <div id="sec-optimize" class="section-body">
     <div id="best-pred-list" style="margin-bottom:8px"></div>
     <div class="btn-row" style="margin-bottom:8px">
       <button class="btn btn-primary btn-sm" onclick="optimizeWeights()">&#x1F4C8; Update Signal Weights</button>
@@ -3726,6 +3724,12 @@ function showToast(msg,type){
   clearTimeout(toastTimer);
   toastTimer=setTimeout(function(){el.className='';},2800);
 }
+function toggleObsWindow(el){
+  var body=el.nextElementSibling;
+  var open=body.style.display!=='none';
+  body.style.display=open?'none':'block';
+  el.querySelector('.obs-arrow').textContent=open?'▾':'▴';
+}
 function toggleSection(id){
   var body=document.getElementById('sec-'+id);
   var title=document.getElementById('sec-title-'+id);
@@ -3983,8 +3987,6 @@ function handleImportFile(evt){
 // PREDICT TAB
 // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
 function renderPredictTab(){
-  var diag=document.getElementById('predict-diag');
-  if(diag) diag.textContent='renderPredictTab called · shop='+activeShop;
   if(!activeShop){
     ['signal-perf-panel','refill-confidence','plain-english','prediction-codes','pairs-panel']
       .forEach(function(id){
@@ -3996,7 +3998,6 @@ function renderPredictTab(){
   db=loadDB();
   var entries=shopEntries(activeShop);
   var preds=shopPreds(activeShop);
-  if(diag) diag.textContent=activeShop+' · '+entries.length+' entries · '+preds.length+' preds';
   if(entries.length<3){
     ['signal-perf-panel','refill-confidence','prediction-codes','pairs-panel']
       .forEach(function(id){
@@ -4309,16 +4310,24 @@ function renderTrackScore(){
     }).join('');
   }
 
-  // Observation window warnings
+  // Observation window — collapsible
   if(obsStates.length){
-    html+='<div style="margin-top:8px;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Obs window</div>';
-    html+=obsStates.map(function(kv){
+    var obsRows=obsStates.map(function(kv){
       var col=kv[1].state==='confirmed'?'var(--red)':kv[1].state==='watching'?'var(--gold)':'var(--muted)';
-      return '<span style="font-size:11px;font-family:var(--mono);margin-right:8px">'
-        +'<span style="color:var(--accent)">'+kv[0]+'</span>'
-        +' <span style="color:'+col+'">'+kv[1].state+'</span>'
-        +'</span>';
+      return '<div style="display:flex;align-items:center;gap:8px;padding:3px 0;border-bottom:1px solid var(--border)">'
+        +'<span class="mono" style="color:var(--accent);min-width:28px">'+kv[0]+'</span>'
+        +'<span style="font-size:11px;color:'+col+'">'+kv[1].state+'</span>'
+        +(kv[1].count?'<span style="font-size:10px;color:var(--muted);margin-left:auto">'+kv[1].count+'x</span>':'')
+        +'</div>';
     }).join('');
+    html+='<div style="margin-top:8px">'
+      +'<div onclick="toggleObsWindow(this)" '
+      +'style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:4px 0;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">'
+      +'Obs Window <span style="color:var(--gold);font-weight:900">'+obsStates.length+'</span>'
+      +'<span class="obs-arrow" style="margin-left:auto">&#x25BE;</span>'
+      +'</div>'
+      +'<div style="display:none">'+obsRows+'</div>'
+      +'</div>';
   }
 
   el.innerHTML=html;
