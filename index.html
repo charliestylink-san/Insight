@@ -2539,6 +2539,7 @@ var alertReason=!btPositive
     ?'Counter-predictive signal: '+(counterSignals.map(function(k){return SIGNAL_NAMES[k]||k;}).join(', '))
     :hitRateDecline?'Hit rate declining \u2014 review before applying'
     :'Backtest positive but significant weight shift ('+Math.round(maxDelta*100)+'%) \u2014 review suggested';
+var lastAlert=db.shops[letter].learnerAlert;
 var sameModel=lastAlert&&lastAlert.learnedW&&
   Math.max.apply(null,SIGNAL_KEYS.map(function(k){
     return Math.abs((learnedW[k]||0)-(lastAlert.learnedW[k]||0));
