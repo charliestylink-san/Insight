@@ -3695,26 +3695,32 @@ function renderLearnerAlert(letter){
   var btHTML='';
   if(a.btDiff!==null&&a.btN){
     var col=a.btDiff>0?'var(--green)':a.btDiff<0?'var(--red)':'var(--muted)';
-    var arrow=a.btDiff>0?'\u2191':a.btDiff<0?'\u2193':'\u2014';
+    var arrow=a.btDiff>0?'\u2191':a.btDiff<0?'\u2193':'';
+    var diffLabel=a.btDiff>0?(arrow+'+'+ a.btDiff+'%'):a.btDiff<0?(arrow+a.btDiff+'%'):'= No difference';
     var extraHits=a.learnedHits-a.currentHits;
     btHTML='<div style="font-size:11px;padding:5px 0;border-top:1px solid var(--border);margin-bottom:4px">'
-      +'<div style="color:var(--muted);font-size:10px;margin-bottom:3px">'
-        +'Over last <strong style="color:var(--text)">'+a.btN+'</strong> refills, this model would have generated '
-        +'<strong style="color:'+col+'">'+Math.abs(extraHits)+' '+(extraHits>=0?'more':'fewer')+'</strong> hits'
+      // Primary: delta is the decision number
+      +'<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:3px">'
+        +'<span style="font-size:16px;font-family:var(--mono);font-weight:900;color:'+col+'">'+diffLabel+'</span>'
+        +'<span style="color:var(--muted);font-size:10px">vs current model over '+a.btN+' refills</span>'
       +'</div>'
-      +'<div style="display:flex;gap:12px">'
-        +'<span><span style="color:var(--gold)">New</span> <span style="font-family:var(--mono);font-weight:900">'+a.btAnchorRate+'%</span></span>'
-        +'<span><span style="color:var(--muted)">Current</span> <span style="font-family:var(--mono);font-weight:900">'+a.btCurrentRate+'%</span></span>'
-        +'<span style="color:'+col+';font-weight:900">'+arrow+(a.btDiff>0?'+':'')+a.btDiff+'%</span>'
+      // Secondary: absolute rates as context
+      +'<div style="display:flex;gap:10px;font-size:10px;color:var(--muted)">'
+        +'<span>This model <span style="font-family:var(--mono);color:var(--text)">'+a.btAnchorRate+'%</span></span>'
+        +'<span>Current <span style="font-family:var(--mono);color:var(--text)">'+a.btCurrentRate+'%</span></span>'
+        +(extraHits!==0?'<span style="color:'+col+'">'+Math.abs(extraHits)+' '+(extraHits>0?'more':'fewer')+' hits</span>':'')
       +'</div>'
     +'</div>';
   }
 
   if(a.needsAlert){
     var isHold=a.btDiff!==null&&a.btDiff<=0;
-    var headerColor=isHold?'var(--red)':'var(--gold)';
-    var headerIcon=isHold?'&#x23F8;':'&#x26A0;&#xFE0F;';
-    var headerText=isHold?'Hold current model':'Review before applying';
+    var isAnchor=!!a.isAnchor;
+    var headerColor=isHold?'var(--red)':isAnchor?'var(--gold)':'var(--gold)';
+    var headerIcon=isHold?'&#x23F8;':isAnchor?'&#x2605;':'&#x26A0;&#xFE0F;';
+    var headerText=isAnchor
+      ?(isHold?'Anchor '+a.anchorDate+' \u2014 Hold current model':'Anchor '+a.anchorDate+' \u2014 Apply this model')
+      :(isHold?'Hold current model':'Review before applying');
     el.innerHTML='<div class="learner-card" style="border-color:'+headerColor+'">'
       +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">'
         +'<span style="font-size:16px">'+headerIcon+'</span>'
@@ -3724,16 +3730,20 @@ function renderLearnerAlert(letter){
         +'</div>'
       +'</div>'
       +btHTML
-      +((a.learnedOnly||[]).length?'<div style="font-size:11px;color:var(--muted);margin-bottom:4px">'
+      +(!isAnchor&&(a.learnedOnly||[]).length?'<div style="font-size:11px;color:var(--muted);margin-bottom:4px">'
         +'Would add: <span class="mono" style="color:var(--green)">'+(a.learnedOnly||[]).join(' ')+'</span>'
         +((a.currentOnly||[]).length?' &#xB7; remove: <span class="mono">'+(a.currentOnly||[]).join(' ')+'</span>':'')
       +'</div>':'')
-      +(missed?'<div style="font-size:10px;color:var(--gold);margin-bottom:6px">Missed codes: '+missed+'</div>':'')
+      +(!isAnchor&&missed?'<div style="font-size:10px;color:var(--gold);margin-bottom:6px">Missed codes: '+missed+'</div>':'')
       +'<div class="btn-row">'
         +(isHold
-          ?'<button class="btn btn-secondary btn-sm" onclick="dismissLearnerAlert()">&#x2713; Keep current</button>'
-          :'<button class="btn btn-primary btn-sm" onclick="applyLearnerWeights()">Apply anyway</button>'
-            +'<button class="btn btn-secondary btn-sm" onclick="dismissLearnerAlert()">&#x2715; Skip</button>'
+          ?'<button class="btn btn-secondary btn-sm" onclick="dismissLearnerAlert(true)">&#x2713; Keep current</button>'
+          :(isAnchor
+            ?'<button class="btn btn-primary btn-sm" onclick="applyLearnerWeights()">&#x2605; Apply anchor</button>'
+             +'<button class="btn btn-secondary btn-sm" onclick="dismissLearnerAlert(true)">&#x2715; Skip</button>'
+            :'<button class="btn btn-primary btn-sm" onclick="applyLearnerWeights()">Apply anyway</button>'
+             +'<button class="btn btn-secondary btn-sm" onclick="dismissLearnerAlert()">&#x2715; Skip</button>'
+          )
         )
       +'</div>'
     +'</div>';
@@ -4583,18 +4593,50 @@ function renderBestPredList(){
   }
   function hitRate(p){var h=0,t=0;Object.values(p.outcome).forEach(function(v){t++;if(v==='hit')h++;});return t?h/t:0;}
   var pinned=db.shops[activeShop].pinnedPredId;
-  var sorted=preds.slice().sort(function(a,b){return hitRate(b)-hitRate(a);}).slice(0,5);
-  el.innerHTML=sorted.map(function(p){
+  var currentW=getWeights(activeShop);
+
+  // Run backtest for each candidate and sort by backtest rate
+  var candidates=preds.slice().sort(function(a,b){return hitRate(b)-hitRate(a);}).slice(0,8);
+  var withBT=candidates.map(function(p){
+    var fromDate=p.actualDate||p.createdDate;
+    var bt=backtestWeights(activeShop,p.weightsAtTime,fromDate);
+    var btCur=bt?backtestWeights(activeShop,currentW,fromDate):null;
+    return {p:p, bt:bt, btCur:btCur,
+      btRate:bt?bt.hitRate:0,
+      btDiff:bt&&btCur?bt.hitRate-btCur.hitRate:null,
+      btN:bt?bt.detail.length:0};
+  });
+  // Sort by backtest rate descending
+  withBT.sort(function(a,b){return b.btRate-a.btRate;});
+  var top5=withBT.slice(0,5);
+
+  el.innerHTML=top5.map(function(item){
+    var p=item.p;
     var h=Object.values(p.outcome).filter(function(v){return v==='hit';}).length;
     var r=Math.round(hitRate(p)*100);
     var d=(p.actualDate||p.createdDate||'').slice(5);
-    var col=r===100?'var(--green)':r>=60?'var(--gold)':'var(--muted)';
     var isPinned=String(p.id)===String(pinned);
+    // Backtest display
+    var btCol=item.btDiff>0?'var(--green)':item.btDiff<0?'var(--red)':'var(--muted)';
+    var btLabel=item.bt
+      ?('<span style="font-family:var(--mono);font-weight:900;color:var(--text)">'+item.btRate+'%</span>'
+        +' <span style="font-size:10px;color:var(--muted)">over '+item.btN+' refills</span>'
+        +(item.btDiff!==null
+          ?' <span style="color:'+btCol+';font-size:10px">'
+            +(item.btDiff>0?'\u2191+':item.btDiff<0?'\u2193':'\u2014')
+            +(item.btDiff!==0?item.btDiff+'%':'no diff')
+            +'</span>'
+          :''))
+      :'';
     return '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">'
       +'<div style="flex:1">'
-        +'<span class="mono" style="font-weight:900;color:'+col+'">'+h+'/'+p.predictedCodes.length+' ('+r+'%)</span>'
-        +' <span class="muted" style="font-size:11px">'+d+'</span>'
-        +(isPinned?'<span style="font-size:10px;color:var(--gold);margin-left:6px">&#x2605; anchored</span>':'')
+        +'<div style="display:flex;align-items:baseline;gap:6px">'
+          +(item.bt?'<span style="font-size:10px;color:var(--muted)">Backtest</span>'+btLabel:'')
+        +'</div>'
+        +'<div style="margin-top:1px">'
+          +'<span class="mono" style="font-size:11px;color:var(--muted)">'+h+'/'+p.predictedCodes.length+' on '+d+'</span>'
+          +(isPinned?'<span style="font-size:10px;color:var(--gold);margin-left:6px">&#x2605; anchored</span>':'')
+        +'</div>'
         +'<div style="font-size:11px;color:var(--muted);margin-top:1px">'
           +p.predictedCodes.map(function(c){
             var hit=p.outcome[c]==='hit';
@@ -4647,35 +4689,66 @@ function useBestPredModel(predId){
   var anchorTest=backtestWeights(activeShop,pred.weightsAtTime,fromDate);
   var currentWeights=getWeights(activeShop);
   var currentTest=backtestWeights(activeShop,currentWeights,fromDate);
+  var diff=anchorTest&&currentTest?anchorTest.hitRate-currentTest.hitRate:null;
+  var btN=anchorTest?anchorTest.detail.length:0;
 
   snapshotCurrentWeights(activeShop);
   db.shops[activeShop].weights=Object.assign({},pred.weightsAtTime);
   db.shops[activeShop].pinnedPredId=String(predId);
-  saveDB(db);
 
+  // Store anchor comparison in learnerAlert so PREDICT tab shows it
   var h=Object.values(pred.outcome).filter(function(v){return v==='hit';}).length;
   var t=pred.predictedCodes.length;
+  var isPositive=diff!==null&&diff>0;
+  db.shops[activeShop].learnerAlert={
+    ts:Date.now(),
+    isAnchor:true,
+    anchorDate:fromDate.slice(5),
+    anchorHits:h,anchorTotal:t,
+    hitGain:isPositive?1:0,
+    applied:false,needsAlert:true,
+    alertReason:isPositive
+      ?'Anchor from '+fromDate.slice(5)+' outperforms current model over '+btN+' refills'
+      :'Anchor from '+fromDate.slice(5)+' does not outperform current model over '+btN+' refills',
+    btAnchorRate:anchorTest?anchorTest.hitRate:null,
+    btCurrentRate:currentTest?currentTest.hitRate:null,
+    btDiff:diff,btN:btN,
+    learnedW:pred.weightsAtTime,
+    prevW:currentWeights,
+    consistencyPct:null,snapshotCount:0,
+    currentHits:currentTest?Math.round(currentTest.hitRate*btN/100):0,
+    learnedHits:anchorTest?Math.round(anchorTest.hitRate*btN/100):0,
+    testN:btN,
+    learnedOnly:[],currentOnly:[],topBoost:[],topReduce:[],
+    missedOpportunities:[]
+  };
+  saveDB(db);
+
   renderBestPredList();
 
   var resultEl=document.getElementById('optimize-result');
   if(resultEl){
+    var col=diff>0?'var(--green)':diff<0?'var(--red)':'var(--muted)';
+    var arrow=diff>0?'\u2191':diff<0?'\u2193':'';
+    var diffLabel=diff>0?(arrow+'+'+diff+'%'):diff<0?(arrow+diff+'%'):'= No difference';
     var btHTML='';
     if(anchorTest&&currentTest&&anchorTest.total>0){
-      var diff=anchorTest.hitRate-currentTest.hitRate;
-      var col=diff>0?'var(--green)':diff<0?'var(--red)':'var(--muted)';
-      var arrow=diff>0?'\u2191':diff<0?'\u2193':'\u2014';
-      btHTML='<div style="margin-top:6px;font-size:11px;border-top:1px solid var(--border);padding-top:6px">'
-        +'<div style="color:var(--muted);margin-bottom:3px;font-size:10px;text-transform:uppercase;letter-spacing:.5px">Backtest from '+fromDate.slice(5)+' ('+anchorTest.detail.length+' refills)</div>'
-        +'<div style="display:flex;gap:16px">'
-          +'<div><span style="color:var(--gold);font-weight:700">Anchor</span> <span style="font-family:var(--mono);font-weight:900">'+anchorTest.hitRate+'%</span></div>'
-          +'<div><span style="color:var(--muted)">Current</span> <span style="font-family:var(--mono);font-weight:900">'+currentTest.hitRate+'%</span></div>'
-          +'<div style="color:'+col+';font-weight:900">'+arrow+(diff>0?'+':'')+diff+'%</div>'
+      btHTML='<div style="margin-top:6px;border-top:1px solid var(--border);padding-top:6px">'
+        +'<div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Backtest from '+fromDate.slice(5)+' ('+btN+' refills)</div>'
+        +'<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px">'
+          +'<span style="font-size:16px;font-family:var(--mono);font-weight:900;color:'+col+'">'+diffLabel+'</span>'
+          +'<span style="font-size:10px;color:var(--muted)">vs current model</span>'
         +'</div>'
+        +'<div style="display:flex;gap:10px;font-size:10px;color:var(--muted);margin-bottom:4px">'
+          +'<span>Anchor <span style="font-family:var(--mono);color:var(--text)">'+anchorTest.hitRate+'%</span></span>'
+          +'<span>Current <span style="font-family:var(--mono);color:var(--text)">'+currentTest.hitRate+'%</span></span>'
+        +'</div>'
+        +'<div style="font-size:10px;color:var(--muted)">Tap PREDICT to see learner recommendation</div>'
       +'</div>';
     }
     resultEl.innerHTML='<div class="alert alert-ok">\u2605 Anchored to '+fromDate.slice(5)+' model ('+h+'/'+t+' hits). Run Rebuild to apply.</div>'+btHTML;
   }
-  showToast('Model anchored','ok');
+  showToast('Model anchored \u2014 tap PREDICT','ok');
 }
 
 // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
