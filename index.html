@@ -32,10 +32,10 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
   font-family:var(--sans);font-size:14px;line-height:1.5}
 
 #app{display:flex;flex-direction:column;height:100%;height:100dvh;padding-top:env(safe-area-inset-top,0px)}
-#panels{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding-bottom:env(safe-area-inset-bottom,0px)}
+#panels{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:12px 14px max(80px,calc(70px + env(safe-area-inset-bottom)))}
 .panel{display:none}
 .panel.active{display:block}
-.panel-inner{padding:12px 14px 0}
+.panel-inner{/* inline */}
 
 /* ── NAV ── */
 #nav{display:flex;background:var(--surface);border-top:1px solid var(--border);flex-shrink:0;padding-bottom:env(safe-area-inset-bottom,0px)}
@@ -224,7 +224,6 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:10px 0}
 
     <!-- ══ DATA TAB ══ -->
     <div class="panel active" id="panel-data">
-    <div class="panel-inner">
 
       <!-- ① Backup / Import -->
       <div class="section-title" id="sec-title-backup" onclick="toggleSection('backup')">① Backup · Import<span class="toggle-icon">&#x25BE;</span></div>
@@ -296,7 +295,6 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:10px 0}
 
     <!-- ══ PREDICT TAB ══ -->
     <div class="panel" id="panel-predict">
-<div class="panel-inner">
 
   <!-- Learner alert -->
   <div id="learner-alert"></div>
@@ -324,12 +322,10 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:10px 0}
     <div id="pairs-panel"></div>
   </div>
 
-</div>
 </div><!-- /panel-predict -->
 
     <!-- ══ TRACK TAB ══ -->
     <div class="panel" id="panel-track">
-<div class="panel-inner">
 
   <!-- ① Score / Confidence -->
   <div class="section-title" id="sec-title-track-score" onclick="toggleSection('track-score')">&#x2460; Score &middot; Confidence<span class="toggle-icon">&#x25BE;</span></div>
@@ -356,7 +352,6 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:10px 0}
     <div id="optimize-result"></div>
   </div>
 
-</div>
 </div><!-- /panel-track -->
 
   </div><!-- /panels -->
