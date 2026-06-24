@@ -2518,10 +2518,23 @@ var hitRateDecline=analysis.trending==="declining"&&
   analysis.last5Rate!==null&&analysis.hitRate>0&&
   analysis.last5Rate<analysis.hitRate-0.10;
 // Alert if big shift OR counter-signal OR declining
-var needsAlert=maxDelta>0.05||counterSignals.length>0||hitRateDecline;
-var shouldUpdate=hitGain>0&&consistent&&meaningful;
-// Skip if same model
-var lastAlert=db.shops[letter].learnerAlert;
+// Primary decision: backtest result drives apply/hold
+// btDiff > 0 = new model beats current over full history → lean toward apply
+// btDiff <= 0 = new model doesn't improve → hold
+var btPositive=btLearned&&btCurrent&&(btLearned.hitRate-btCurrent.hitRate)>0;
+var btDiffVal=btLearned&&btCurrent?btLearned.hitRate-btCurrent.hitRate:null;
+
+// Alert conditions — even if backtest is positive, flag for review if risky
+var needsAlert=(!btPositive)||(maxDelta>0.05||counterSignals.length>0||hitRateDecline);
+// shouldUpdate: backtest positive AND consistent signal
+var shouldUpdate=btPositive&&hitGain>0&&consistent;
+// Alert reason — now driven by backtest first
+var alertReason=!btPositive
+  ?'Backtest shows no improvement over '+TEST_N+' refills \u2014 holding current model'
+  :counterSignals.length>0
+    ?'Counter-predictive signal: '+(counterSignals.map(function(k){return SIGNAL_NAMES[k]||k;}).join(', '))
+    :hitRateDecline?'Hit rate declining \u2014 review before applying'
+    :'Backtest positive but significant weight shift ('+Math.round(maxDelta*100)+'%) \u2014 review suggested';
 var sameModel=lastAlert&&lastAlert.learnedW&&
   Math.max.apply(null,SIGNAL_KEYS.map(function(k){
     return Math.abs((learnedW[k]||0)-(lastAlert.learnedW[k]||0));
@@ -2546,13 +2559,8 @@ if(needsAlert) db.shops[letter].weights=currentW;
 var sigChanges=SIGNAL_KEYS.map(function(k){
   return {k:k,delta:learnedW[k]-(currentW[k]||DEFAULT_WEIGHTS[k])};
 }).sort(function(a,b){return Math.abs(b.delta)-Math.abs(a.delta);});
-var alertReason=counterSignals.length>0
-  ?"Counter-predictive signal: "+(counterSignals.map(function(k){return SIGNAL_NAMES[k]||k;}).join(", "))
-  :hitRateDecline?"Hit rate declining \u2014 review before applying"
-  :"Significant weight shift ("+Math.round(maxDelta*100)+"%) \u2014 review suggested";
-// Backtest both models against last N refills forward from earliest test pred
 // Use backtest already computed above (all resolved predictions)
-var btDiff=btLearned&&btCurrent?btLearned.hitRate-btCurrent.hitRate:null;
+var btDiff=btDiffVal;
 db.shops[letter].learnerAlert={
   ts:Date.now(),hitGain:hitGain,applied:!needsAlert,needsAlert:needsAlert,
   alertReason:needsAlert?alertReason:null,
@@ -3637,16 +3645,17 @@ function renderLearnerAlert(letter){
   }
 
   if(a.needsAlert){
-    el.innerHTML='<div class="learner-card" style="border-color:var(--gold)">'
+    var isHold=a.btDiff!==null&&a.btDiff<=0;
+    var headerColor=isHold?'var(--red)':'var(--gold)';
+    var headerIcon=isHold?'&#x23F8;':'&#x26A0;&#xFE0F;';
+    var headerText=isHold?'Hold current model':'Review before applying';
+    el.innerHTML='<div class="learner-card" style="border-color:'+headerColor+'">'
       +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">'
-        +'<span style="font-size:16px">&#x26A0;&#xFE0F;</span>'
+        +'<span style="font-size:16px">'+headerIcon+'</span>'
         +'<div>'
-          +'<div style="font-size:12px;font-weight:700;color:var(--gold)">Review suggested before applying</div>'
+          +'<div style="font-size:12px;font-weight:700;color:'+headerColor+'">'+headerText+'</div>'
           +'<div style="font-size:10px;color:var(--muted)">'+a.alertReason+'</div>'
         +'</div>'
-      +'</div>'
-      +'<div style="font-size:11px;color:var(--muted);margin-bottom:4px">'
-        +'+'+a.hitGain+' hit'+(a.hitGain>1?'s':'')+' improvement &#xB7; '+a.consistencyPct+'% consistent across '+a.snapshotCount+' refills'
       +'</div>'
       +btHTML
       +((a.learnedOnly||[]).length?'<div style="font-size:11px;color:var(--muted);margin-bottom:4px">'
@@ -3655,8 +3664,11 @@ function renderLearnerAlert(letter){
       +'</div>':'')
       +(missed?'<div style="font-size:10px;color:var(--gold);margin-bottom:6px">Missed codes: '+missed+'</div>':'')
       +'<div class="btn-row">'
-        +'<button class="btn btn-primary btn-sm" onclick="applyLearnerWeights()">Apply anyway</button>'
-        +'<button class="btn btn-secondary btn-sm" onclick="dismissLearnerAlert()">&#x2715; Skip</button>'
+        +(isHold
+          ?'<button class="btn btn-secondary btn-sm" onclick="dismissLearnerAlert()">&#x2713; Keep current</button>'
+          :'<button class="btn btn-primary btn-sm" onclick="applyLearnerWeights()">Apply anyway</button>'
+            +'<button class="btn btn-secondary btn-sm" onclick="dismissLearnerAlert()">&#x2715; Skip</button>'
+        )
       +'</div>'
     +'</div>';
   } else {
