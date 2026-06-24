@@ -2486,7 +2486,11 @@ var learnedW=analysis.optimalWeights||currentW;
 var sorted=entries.slice().sort(function(a,b){return a.date.localeCompare(b.date);});
 // Backtest both models across ALL resolved predictions — not a fixed window
 // "If new model had run from the beginning, how many more hits over N refills?"
-var btFromDate=resolved.length>0?resolved[0].createdDate:sorted[0].date;
+// Use model history for per-version backtesting if available
+// Otherwise backtest from first resolved prediction
+var modelHistory=db.shops[letter].modelHistory||[];
+var lastApply=modelHistory.filter(function(v){return v.decision==='apply';}).slice(-1)[0];
+var btFromDate=lastApply?lastApply.date:(resolved.length>0?resolved[0].createdDate:sorted[0].date);
 var btLearned=backtestWeights(letter,learnedW,btFromDate);
 var btCurrent=backtestWeights(letter,currentW,btFromDate);
 var TEST_N=btLearned?btLearned.detail.length:resolved.length;
@@ -2758,6 +2762,45 @@ function snapshotCurrentWeights(letter){
   var w=getWeights(letter);
   db.shops[letter].preManualWeights=Object.assign({},w);
   saveDB(db);
+}
+
+function recordModelDecision(letter, decision, learnedW, btResult){
+  // Stamp every apply/hold decision with full context
+  // decision: 'apply' | 'hold'
+  // All predictions made after this point will carry this modelVerId
+  if(!letter) return;
+  db=loadDB();
+  var history=db.shops[letter].modelHistory||[];
+  var verId=Date.now();
+  var preds=shopPreds(letter);
+  var pendingId=null;
+  var pending=preds.filter(function(p){return p.status==='pending';});
+  if(pending.length) pendingId=pending[pending.length-1].id;
+  history.push({
+    id:verId,
+    date:todayStr(),
+    ts:Date.now(),
+    decision:decision,
+    weightsApplied:decision==='apply'?Object.assign({},learnedW):null,
+    weightsBefore:Object.assign({},getWeights(letter)),
+    btAnchorRate:btResult?btResult.btAnchorRate:null,
+    btCurrentRate:btResult?btResult.btCurrentRate:null,
+    btDiff:btResult?btResult.btDiff:null,
+    btN:btResult?btResult.btN:null,
+    predIdAtTime:pendingId
+  });
+  // Keep last 20 model decisions
+  if(history.length>20) history=history.slice(-20);
+  db.shops[letter].modelHistory=history;
+  // Tag active pending prediction with this model version
+  if(decision==='apply'&&pendingId){
+    var pred=preds.find(function(p){return p.id===pendingId;});
+    if(pred) pred.modelVerId=verId;
+  }
+  // Store current modelVerId on shop for tagging future predictions
+  db.shops[letter].currentModelVerId=verId;
+  saveDB(db);
+  return verId;
 }
 
 
@@ -4475,19 +4518,25 @@ function applyLearnerWeights(){
   if(!activeShop) return;
   db=loadDB();
   var a=db.shops[activeShop]&&db.shops[activeShop].learnerAlert;
-  if(a&&a.needsAlert&&a.learnedW){
-    // Alert mode \u2014 weights not yet applied, apply now
+  if(a&&a.learnedW){
     snapshotCurrentWeights(activeShop);
     db.shops[activeShop].weights=a.learnedW;
     db.shops[activeShop].learnerAlert=Object.assign({},a,{applied:true,needsAlert:false});
     saveDB(db);
+    recordModelDecision(activeShop,'apply',a.learnedW,a);
   }
   rebuildActiveShop();
   dismissLearnerAlert();
-  showToast('Model applied','ok');
+  showToast('Model applied — rebuilding','ok');
 }
 
-function dismissLearnerAlert(){
+function dismissLearnerAlert(isHold){
+  // Record hold decision if owner explicitly chose to keep current model
+  if(isHold&&activeShop){
+    db=loadDB();
+    var a=db.shops[activeShop]&&db.shops[activeShop].learnerAlert;
+    if(a) recordModelDecision(activeShop,'hold',null,a);
+  }
   if(!activeShop) return;
   db=loadDB();
   if(db.shops[activeShop]) db.shops[activeShop].learnerAlert=null;
@@ -4788,7 +4837,8 @@ scores:finalTop5.reduce(function(o,x){o[x[0]]=Math.round(x[1]/fMax*100);return o
 frozenScores:fNorm,
 frozenSnapshots:compactSnaps,
 weightsAtTime:Object.assign({},finalResult.weights),
-status:'pending',outcome:null,actualDate:null,actualCodes:null,auto:true
+status:'pending',outcome:null,actualDate:null,actualCodes:null,auto:true,
+    modelVerId:(db.shops[letter]&&db.shops[letter].currentModelVerId)||null
 });
 saveDB(db);
 }
