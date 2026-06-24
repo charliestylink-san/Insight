@@ -3809,7 +3809,11 @@ function showTab(tab){
   document.getElementById('panel-'+tab).classList.add('active');
   document.getElementById('nav-'+tab).classList.add('active');
   if(tab==='data')    renderDataTab();
-  if(tab==='predict') renderPredictTab();
+  if(tab==='predict'){
+    renderPredictTab();
+    // Run learner on demand whenever owner opens PREDICT
+    if(activeShop) setTimeout(function(){ runBackgroundLearner(activeShop); }, 50);
+  }
   if(tab==='track')   renderTrackTab();
 }
 
@@ -3824,7 +3828,11 @@ function selectShop(code){
   var rebuildBtn=document.getElementById('rebuild-active-btn');
   if(rebuildBtn) rebuildBtn.style.display=activeShop?'':'none';
   if(activeTab==='data')    renderDataTab();
-  if(activeTab==='predict') renderPredictTab();
+  if(activeTab==='predict'){
+    renderPredictTab();
+    // Run learner on demand when switching shops on PREDICT
+    setTimeout(function(){ runBackgroundLearner(activeShop); }, 50);
+  }
   if(activeTab==='track')   renderTrackTab();
 }
 
