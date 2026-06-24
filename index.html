@@ -4712,8 +4712,12 @@ function onRebuildDone(letter, count){
   var el=document.getElementById('rebuild-result');
   if(el) el.innerHTML='<div class="alert alert-ok">&#x2705; '+letter+' rebuilt \u2014 '+count+' predictions generated</div>';
   renderShopPills();
-  if(activeTab==='predict') renderPredictTab();
-  if(activeTab==='track')   renderTrackTab();
+  // Run learner immediately after rebuild so alert is ready
+  setTimeout(function(){
+    runBackgroundLearner(letter);
+    if(activeTab==='predict') renderPredictTab();
+    if(activeTab==='track')   renderTrackTab();
+  }, 100);
   showToast('Rebuild complete','ok');
 }
 
