@@ -4664,18 +4664,49 @@ function backtestWeights(letter, weights, fromDate){
   for(var i=fromIdx;i<entries.length-1;i++){
     var trainEntries=entries.slice(0,i);
     var actual=entries[i].codes;
-    // Build score using given weights
-    var tempDB=JSON.parse(JSON.stringify(db));
-    tempDB.shops[letter].weights=Object.assign({},weights);
-    var savedDB=db; db=tempDB;
-    var result=buildCombinedScore(trainEntries,[],letter);
-    db=savedDB;
-    var top5=Object.entries(result.scores).sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];});
+    // Score directly using provided weights — bypass getWeights/loadDB
+    var scores=buildWeightedScoreDirect(trainEntries, weights);
+    var top5=Object.entries(scores).sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];});
     var h=top5.filter(function(c){return actual.indexOf(c)>-1;}).length;
     hits+=h; total+=top5.length;
     detail.push({date:entries[i].date,hits:h,total:top5.length});
   }
   return {hits:hits,total:total,hitRate:total?Math.round(hits/total*100):0,detail:detail};
+}
+
+function buildWeightedScoreDirect(entries, weights){
+  // Score all codes using provided weights directly — no DB access
+  if(!entries||entries.length<3) return {};
+  var w=Object.assign({},DEFAULT_WEIGHTS,weights);
+  var freq=buildFreqMap(entries);
+  var recency=buildWeightedScore(entries);
+  var streaks=buildStreaks(entries);
+  var cooccur=buildCooccurrence(entries);
+  var cycle=buildCycleScore(entries);
+  var momentum=(buildMomentumScore(entries).scores)||{};
+  var overdue=buildOverdueScore(entries);
+  var interval=buildIntervalRegularity(entries);
+  var dow=buildDayOfWeekScore(entries);
+  var qty=buildQtyDominance(entries);
+  var qtyStreak=buildQtyStreak(entries);
+  var allCodes=Array.from(new Set(entries.reduce(function(a,e){return a.concat(e.codes);},[]) ));
+  var scores={};
+  allCodes.forEach(function(c){
+    scores[c]=
+      (freq[c]||0)*w.freq+
+      (recency[c]||0)*w.recency+
+      (streaks[c]||0)*w.streak+
+      (cooccur[c]||0)*w.cooccur+
+      (cycle[c]||0)*w.cycle+
+      (momentum[c]||0)*w.momentum+
+      (overdue[c]||0)*w.overdue+
+      (interval[c]||0)*w.interval+
+      (dow[c]||0)*w.dow+
+      (qty[c]||0)*w.qtydom+
+      (qtyStreak[c]||0)*w.qtystreak+
+      w.bias;
+  });
+  return scores;
 }
 
 function useBestPredModel(predId){
