@@ -4594,53 +4594,34 @@ function renderBestPredList(){
   function hitRate(p){var h=0,t=0;Object.values(p.outcome).forEach(function(v){t++;if(v==='hit')h++;});return t?h/t:0;}
   var pinned=db.shops[activeShop].pinnedPredId;
   var currentW=getWeights(activeShop);
+  var candidates=preds.slice().sort(function(a,b){return hitRate(b)-hitRate(a);}).slice(0,5);
 
-  // Run backtest for each candidate and sort by backtest rate
-  var candidates=preds.slice().sort(function(a,b){return hitRate(b)-hitRate(a);}).slice(0,8);
-  var withBT=candidates.map(function(p){
-    var fromDate=p.actualDate||p.createdDate;
-    var bt=backtestWeights(activeShop,p.weightsAtTime,fromDate);
-    var btCur=bt?backtestWeights(activeShop,currentW,fromDate):null;
-    return {p:p, bt:bt, btCur:btCur,
-      btRate:bt?bt.hitRate:0,
-      btDiff:bt&&btCur?bt.hitRate-btCur.hitRate:null,
-      btN:bt?bt.detail.length:0};
-  });
-  // Sort by backtest rate descending
-  withBT.sort(function(a,b){return b.btRate-a.btRate;});
-  var top5=withBT.slice(0,5);
-
-  el.innerHTML=top5.map(function(item){
-    var p=item.p;
+  // Phase 1: render immediately with single-prediction rates
+  function rowHTML(p, btInfo){
     var h=Object.values(p.outcome).filter(function(v){return v==='hit';}).length;
     var r=Math.round(hitRate(p)*100);
     var d=(p.actualDate||p.createdDate||'').slice(5);
     var isPinned=String(p.id)===String(pinned);
-    // Backtest display
-    var btCol=item.btDiff>0?'var(--green)':item.btDiff<0?'var(--red)':'var(--muted)';
-    var btLabel=item.bt
-      ?('<span style="font-family:var(--mono);font-weight:900;color:var(--text)">'+item.btRate+'%</span>'
-        +' <span style="font-size:10px;color:var(--muted)">over '+item.btN+' refills</span>'
-        +(item.btDiff!==null
-          ?' <span style="color:'+btCol+';font-size:10px">'
-            +(item.btDiff>0?'\u2191+':item.btDiff<0?'\u2193':'\u2014')
-            +(item.btDiff!==0?item.btDiff+'%':'no diff')
-            +'</span>'
-          :''))
-      :'';
-    return '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">'
+    var btHTML='';
+    if(btInfo){
+      var btCol=btInfo.diff>0?'var(--green)':btInfo.diff<0?'var(--red)':'var(--muted)';
+      var diffStr=btInfo.diff>0?'\u2191+'+btInfo.diff+'%':btInfo.diff<0?'\u2193'+btInfo.diff+'%':'= No diff';
+      btHTML='<span style="font-family:var(--mono);font-weight:900;color:var(--text)">'+btInfo.rate+'%</span>'
+        +' <span style="font-size:10px;color:var(--muted)">'+btInfo.n+' refills</span>'
+        +' <span style="color:'+btCol+';font-size:10px">'+diffStr+'</span>';
+    } else {
+      btHTML='<span style="font-size:10px;color:var(--muted)">computing\u2026</span>';
+    }
+    return '<div id="bprow-'+p.id+'" style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">'
       +'<div style="flex:1">'
-        +'<div style="display:flex;align-items:baseline;gap:6px">'
-          +(item.bt?'<span style="font-size:10px;color:var(--muted)">Backtest</span>'+btLabel:'')
-        +'</div>'
-        +'<div style="margin-top:1px">'
+        +'<div style="font-size:10px;color:var(--muted);margin-bottom:1px">Backtest '+btHTML+'</div>'
+        +'<div>'
           +'<span class="mono" style="font-size:11px;color:var(--muted)">'+h+'/'+p.predictedCodes.length+' on '+d+'</span>'
           +(isPinned?'<span style="font-size:10px;color:var(--gold);margin-left:6px">&#x2605; anchored</span>':'')
         +'</div>'
         +'<div style="font-size:11px;color:var(--muted);margin-top:1px">'
           +p.predictedCodes.map(function(c){
-            var hit=p.outcome[c]==='hit';
-            return '<span style="color:'+(hit?'var(--green)':'var(--muted)')+'">'+c+'</span>';
+            return '<span style="color:'+(p.outcome[c]==='hit'?'var(--green)':'var(--muted)')+'">'+c+'</span>';
           }).join(' ')
         +'</div>'
       +'</div>'
@@ -4650,7 +4631,26 @@ function renderBestPredList(){
         +(isPinned?'&#x2605; Anchored':'Use this')
       +'</button>'
     +'</div>';
-  }).join('');
+  }
+
+  // Render immediately
+  el.innerHTML=candidates.map(function(p){return rowHTML(p,null);}).join('');
+
+  // Phase 2: backtest each row lazily with delay between each
+  candidates.forEach(function(p, idx){
+    setTimeout(function(){
+      var fromDate=p.actualDate||p.createdDate;
+      var bt=backtestWeights(activeShop,p.weightsAtTime,fromDate);
+      var btCur=bt?backtestWeights(activeShop,currentW,fromDate):null;
+      var btInfo=bt?{
+        rate:bt.hitRate,
+        n:bt.detail.length,
+        diff:btCur?bt.hitRate-btCur.hitRate:null
+      }:null;
+      var row=document.getElementById('bprow-'+p.id);
+      if(row) row.outerHTML=rowHTML(p,btInfo);
+    }, idx*300); // 300ms apart — responsive, not blocking
+  });
 }
 
 function backtestWeights(letter, weights, fromDate){
