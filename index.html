@@ -2544,7 +2544,27 @@ var sameModel=lastAlert&&lastAlert.learnedW&&
     return Math.abs((learnedW[k]||0)-(lastAlert.learnedW[k]||0));
   }))<0.02;
 if(!shouldUpdate||sameModel){
-  if(!shouldUpdate) db.shops[letter].learnerAlert=null;
+  // Still store a hold verdict so owner can see learner's assessment
+  if(!sameModel){
+    var curT5Early=Object.entries(buildCombinedScore(sorted,preds,letter).scores)
+      .sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];});
+    db.shops[letter].learnerAlert={
+      ts:Date.now(),hitGain:hitGain,applied:false,needsAlert:true,
+      alertReason:!btPositive
+        ?'Backtest shows no improvement over '+TEST_N+' refills \u2014 holding current model'
+        :'Not enough consistent signal yet \u2014 holding current model',
+      consistencyPct:Math.round(consistency*100),snapshotCount:snaps.length,
+      currentHits:currentHits,learnedHits:learnedHits,testN:TEST_N,
+      btAnchorRate:btLearned?btLearned.hitRate:null,
+      btCurrentRate:btCurrent?btCurrent.hitRate:null,
+      btDiff:btDiffVal,btN:TEST_N,
+      currentTop5:curT5Early,learnedTop5:curT5Early,
+      learnedOnly:[],currentOnly:[],
+      topBoost:[],topReduce:[],
+      learnedW:learnedW,prevW:currentW,
+      missedOpportunities:(analysis.missedOpportunities||[]).slice(0,3)
+    };
+  }
   updateCodeLifts(letter,preds,db);
   saveDB(db);
   if(activeTab==="predict") renderLearnerAlert(letter);
@@ -3662,7 +3682,9 @@ function renderLearnerAlert(letter){
   if(!el) return;
   db=loadDB();
   var a=db.shops[letter]&&db.shops[letter].learnerAlert;
-  if(!a||!a.hitGain||a.hitGain<=0){el.style.display='none';return;}
+  if(!a||a.hitGain===undefined){el.style.display='none';return;}
+  // Always show if learner has run — even hold verdict
+  if(!a.btAnchorRate&&(!a.hitGain||a.hitGain<=0)){el.style.display='none';return;}
   el.style.display='block';
   var boost=(a.topBoost||[]).map(function(s){return (SIGNAL_NAMES[s.k]||s.k)+' &#x2191;';}).join(', ');
   var reduce=(a.topReduce||[]).map(function(s){return (SIGNAL_NAMES[s.k]||s.k)+' &#x2193;';}).join(', ');
