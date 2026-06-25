@@ -350,6 +350,12 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:10px 0}
     <div id="optimize-result"></div>
   </div>
 
+  <!-- ④ Model History -->
+  <div class="section-title collapsed" id="sec-title-model-history" onclick="toggleSection('model-history')">&#x2463; Model History<span class="toggle-icon">&#x25BE;</span></div>
+  <div id="sec-model-history" class="section-body collapsed" style="max-height:0px">
+    <div id="model-history-panel"></div>
+  </div>
+
 </div><!-- /panel-track -->
 
   </div><!-- /panels -->
@@ -432,28 +438,30 @@ var DB_KEY='inv_intel_v4', DB_BAK='inv_intel_bak', AK_KEY='inv_intel_apikey';
 // \u2500\u2500 ENGINE \u2500\u2500
 var DEFAULT_WEIGHTS = {
 freq:     0.12,
-recency:  0.11,
-streak:   0.09,
-bias:     0.07,
-cooccur:  0.12,
-interval: 0.06,
+recency:  0.10,
+streak:   0.08,
+bias:     0.06,
+cooccur:  0.11,
+seqcooccur: 0.10,
+interval: 0.05,
 dow:      0.03,
-cycle:    0.09,
+cycle:    0.08,
 overdue:  0.06,
-qtydom:   0.09,
-qtystreak:0.06,
-momentum: 0.14
+qtydom:   0.08,
+qtystreak:0.05,
+momentum: 0.12
 };
-var SIGNAL_KEYS = ['freq','recency','streak','bias','cooccur','interval','dow','cycle','overdue','qtydom','qtystreak','momentum'];
+var SIGNAL_KEYS = ['freq','recency','streak','bias','cooccur','seqcooccur','interval','dow','cycle','overdue','qtydom','qtystreak','momentum'];
 var SIGNAL_NAMES = {
 freq:'Frequency', recency:'Recency', streak:'Streak', bias:'Pred. accuracy',
-cooccur:'Co-occur', interval:'Interval', dow:'Day-of-wk', cycle:'Cycle',
+cooccur:'Co-occur', seqcooccur:'Seq. co-occur', interval:'Interval', dow:'Day-of-wk', cycle:'Cycle',
 overdue:'Overdue', qtydom:'Qty dominance', qtystreak:'Qty streak',
 momentum:'Momentum'
 };
 var SIGNAL_COLORS = {
 freq:'var(--sig-freq)', recency:'var(--sig-recency)', streak:'var(--sig-streak)',
-bias:'var(--sig-bias)', cooccur:'var(--sig-cooccur)', interval:'var(--sig-interval)',
+bias:'var(--sig-bias)', cooccur:'var(--sig-cooccur)', seqcooccur:'var(--sig-cooccur)',
+interval:'var(--sig-interval)',
 dow:'var(--sig-dow)', cycle:'var(--sig-cycle)', overdue:'var(--sig-overdue)',
 qtydom:'var(--sig-qtydom)', qtystreak:'var(--sig-qtystreak)',
 momentum:'var(--sig-momentum)'
@@ -850,6 +858,7 @@ var rec       = buildWeightedScore(entries);
 var str       = buildStreaks(entries);
 var bias      = buildBias(predictions||[]);
 var cooc      = buildCooccurrence(entries);
+var seqcooc   = buildSequentialCooccur(entries);
 var tightCooc = buildTightCooccurrence(entries);
 var intReg    = buildIntervalRegularity(entries);
 var dow       = buildDowPattern(entries);
@@ -920,12 +929,14 @@ all.forEach(function(c){
 var bVal  = bias[c]!==undefined ? bias[c] : 0.5;
 var boost = Math.max(0,(bVal-0.5)*2);
 var coocNorm = ((cooc[c]||0)/mC + (tightCooc[c]||0)/mTC*2)/3;
+var mSC = Math.max.apply(null,Object.values(seqcooc).concat([0.001]));
 var sig = {
 freq:      (freq[c]||0)/mF,
 recency:   (rec[c]||0)/mR,
 streak:    (str[c]||0)/mS,
 bias:      boost,
 cooccur:   coocNorm,
+seqcooccur:(seqcooc[c]||0)/(mSC||1),
 interval:  (intReg[c]||0),
 dow:       (dow[c]||0),
 cycle:     (cycle[c]||0),
@@ -940,6 +951,7 @@ sig.recency   * effectiveW.recency   +
 sig.streak    * effectiveW.streak    +
 sig.bias      * effectiveW.bias      +
 sig.cooccur   * effectiveW.cooccur   +
+sig.seqcooccur* (effectiveW.seqcooccur||DEFAULT_WEIGHTS.seqcooccur) +
 sig.interval  * effectiveW.interval  +
 sig.dow       * effectiveW.dow       +
 sig.cycle     * effectiveW.cycle     +
@@ -1917,18 +1929,26 @@ threshVal=(appRate[code]||0)*0.67;
 var bias=buildBias(preds);
 var biasVal=bias[code]!==undefined?bias[code]:0.5;
 var obs=letter?(shopObs(letter)[code]||{state:'idle'}):{state:'idle'};
-var obsPenalty={idle:0,watching:30,recovering:20,confirmed:60,ambiguous:0}[obs.state]||0;
-var obsVal=Math.max(0,100-obsPenalty)/100;
+// New directional obs: confirmed/watching = hits (boost grade), overdue = misses (reduce grade)
+var obsPenalty={idle:0,watching:-10,recovering:0,confirmed:-20,overdue:25,ambiguous:0}[obs.state]||0;
+var obsVal=Math.max(0,Math.min(130,100-obsPenalty))/100;
 var momVal=Math.min(1,Math.max(0,snap.momentum||0.5));
 var w={consensus:0.25, threshold:0.30, bias:0.25, obs:0.15, momentum:0.05};
-var resolvedAll=preds.filter(function(p){return p.status!=='pending'&&p.outcome&&p.signalSnapshot;});
+var resolvedAll=preds.filter(function(p){
+  return p.status!=='pending'&&p.outcome&&
+    (p.signalSnapshot||p.frozenSnapshots||p.id);
+});
 if(resolvedAll.length>=5){
 var lifts={consensus:0,threshold:0,obs:0};
 var liftCounts={consensus:0,threshold:0,obs:0};
 resolvedAll.forEach(function(p){
 if(p.predictedCodes.indexOf(code)===-1) return;
 var isHit=p.outcome&&p.outcome[code]==='hit'?1:0;
-var pSnap=p.signalSnapshot&&p.signalSnapshot[code]||{};
+// Use frozenSnapshots (new format) or signalSnapshot (old format)
+var rawSnap=getSnapshotForPred(p);
+var isCompact=!!(p.frozenSnapshots&&p.modelVersion);
+var decompSnap=decompressSnap(rawSnap,isCompact);
+var pSnap=decompSnap[code]||p.signalSnapshot&&p.signalSnapshot[code]||{};
 var pWts=p.weightsAtTime||weights;
 var pCons=buildSignalConsensus(code,pSnap,pWts,pWts).score/100;
 lifts.consensus+=(isHit-0.5)*(pCons-0.5)*4;
@@ -2010,7 +2030,7 @@ var consVal=top5Codes.length?consensusSum/top5Codes.length:0.5;
 var obsPenSum=0;
 top5Codes.forEach(function(c){
 var st=(obs[c]||{state:'idle'}).state;
-obsPenSum+={confirmed:40,watching:15,recovering:20,idle:0,ambiguous:0}[st]||0;
+obsPenSum+={confirmed:-20,watching:-10,recovering:0,idle:0,overdue:25,ambiguous:0}[st]||0;
 });
 var obsVal=Math.max(0,1-(obsPenSum/top5Codes.length)/100);
 var last5=resolved.slice(-5);
@@ -2341,16 +2361,19 @@ resolved.forEach(function(p,idx){
   });
   // Surprise codes \u2014 signal was there but model missed them
   var surprises=p.surpriseCodes||(p.actualCodes||[]).filter(function(c){return p.predictedCodes.indexOf(c)===-1;});
-  surprises.forEach(function(c){
-    SIGNAL_KEYS.forEach(function(k){
-      if(k==='bias') return;
-      var v=sv(c,k); if(v===null) return;
-      // Surprise arrived = hit=1 but model didn't predict it
-      var st=sigStats[k];
-      if(v>=0.6){st.highHits+=1*rw*0.7;st.highTotal+=rw*0.7;}
-      else if(v<=0.35){st.lowHits+=1*rw*0.7;st.lowTotal+=rw*0.7;}
+    // Surprise codes — appeared but not predicted
+    // Full weight: a code that appeared IS the ground truth
+    // Regime-weighted: stable surprises are stronger learning signal
+    var surpriseRegW=p.regimeAtTime&&p.regimeAtTime.shifting?0.7:1.0;
+    surprises.forEach(function(c){
+      SIGNAL_KEYS.forEach(function(k){
+        if(k==='bias') return;
+        var v=sv(c,k); if(v===null) return;
+        var st=sigStats[k];
+        if(v>=0.6){st.highHits+=1*rw*surpriseRegW;st.highTotal+=rw*surpriseRegW;}
+        else if(v<=0.35){st.lowHits+=1*rw*surpriseRegW;st.lowTotal+=rw*surpriseRegW;}
+      });
     });
-  });
 });
 
 // Compute lift per signal
@@ -2497,15 +2520,21 @@ var TEST_N=btLearned?btLearned.detail.length:resolved.length;
 var currentHits=btCurrent?Math.round(btCurrent.hitRate*TEST_N/100):0;
 var learnedHits=btLearned?Math.round(btLearned.hitRate*TEST_N/100):0;
 var hitGain=learnedHits-currentHits;
-// Accumulate snapshot
+// Accumulate snapshot — weighted by current regime
+var regimeCurrent=detectRegimeShift(sorted);
+var snapRegimeW=regimeCurrent.shifting?0.6:1.0; // stable predictions count more
 var snaps=db.shops[letter].learnerSnapshots||[];
 snaps.push({ts:Date.now(),learnedW:learnedW,hitGain:hitGain,
-  currentHits:currentHits,learnedHits:learnedHits,testN:TEST_N});
+  currentHits:currentHits,learnedHits:learnedHits,testN:TEST_N,
+  regimeW:snapRegimeW,shifting:regimeCurrent.shifting});
 if(snaps.length>10) snaps=snaps.slice(-10);
 db.shops[letter].learnerSnapshots=snaps;
-// Q4: Classify \u2014 autopilot vs alert
+// Q4: Classify — consistency weighted by regime
 var positiveSnaps=snaps.filter(function(s){return s.hitGain>0;});
-var consistency=snaps.length>0?positiveSnaps.length/snaps.length:0;
+// Weighted consistency: stable snaps count more
+var weightedPositive=snaps.reduce(function(acc,s){return acc+(s.hitGain>0?(s.regimeW||1.0):0);},0);
+var weightedTotal=snaps.reduce(function(acc,s){return acc+(s.regimeW||1.0);},0);
+var consistency=weightedTotal>0?weightedPositive/weightedTotal:0;
 var consistent=consistency>=0.6&&snaps.length>=2;
 var meaningful=hitGain>=1&&TEST_N>0&&hitGain/TEST_N>=0.15;
 // Magnitude of weight change
@@ -2528,32 +2557,52 @@ var hitRateDecline=analysis.trending==="declining"&&
 var btPositive=btLearned&&btCurrent&&(btLearned.hitRate-btCurrent.hitRate)>0;
 var btDiffVal=btLearned&&btCurrent?btLearned.hitRate-btCurrent.hitRate:null;
 
-// Alert conditions — even if backtest is positive, flag for review if risky
-var needsAlert=(!btPositive)||(maxDelta>0.05||counterSignals.length>0||hitRateDecline);
-// shouldUpdate: backtest positive AND consistent signal
+// shouldUpdate: backtest positive AND consistent signal AND meaningful improvement
 var shouldUpdate=btPositive&&hitGain>0&&consistent;
-// Alert reason — now driven by backtest first
+
+// Learner decides its own readiness to surface — no hardcoded N
+// Cross-checks internal evidence against backtest result:
+// 1. btN must be meaningful relative to what learner has observed
+// 2. consistency must agree with btDiff direction
+// 3. snapshotCount must show enough observations to trust the signal
+var btNMeaningful=TEST_N>=snaps.length; // backtest covers at least as many refills as learner has snapshots
+var consistencyAgreesWithBT=btPositive?(consistency>=0.6):true;
+var enoughObservations=snaps.length>=3;
+var readyToSurface=btNMeaningful&&consistencyAgreesWithBT&&enoughObservations;
+
+// Primary decision based on backtest
+var needsAlert=!shouldUpdate||(maxDelta>0.05||counterSignals.length>0||hitRateDecline);
+
+// Alert reason — clear and honest
 var alertReason=!btPositive
   ?'Backtest shows no improvement over '+TEST_N+' refills \u2014 holding current model'
-  :counterSignals.length>0
-    ?'Counter-predictive signal: '+(counterSignals.map(function(k){return SIGNAL_NAMES[k]||k;}).join(', '))
-    :hitRateDecline?'Hit rate declining \u2014 review before applying'
-    :'Backtest positive but significant weight shift ('+Math.round(maxDelta*100)+'%) \u2014 review suggested';
+  :!consistent&&btPositive
+    ?'Backtest \u2191+'+Math.round(btDiffVal||0)+'% but only '+TEST_N+' refills tested \u2014 not enough to be certain'
+    :counterSignals.length>0
+      ?'Counter-predictive signal detected: '+(counterSignals.map(function(k){return SIGNAL_NAMES[k]||k;}).join(', '))
+      :hitRateDecline
+        ?'Hit rate declining \u2014 review before applying'
+        :'Significant weight shift ('+Math.round(maxDelta*100)+'%) \u2014 review before applying';
 var lastAlert=db.shops[letter].learnerAlert;
 var sameModel=lastAlert&&lastAlert.learnedW&&
   Math.max.apply(null,SIGNAL_KEYS.map(function(k){
     return Math.abs((learnedW[k]||0)-(lastAlert.learnedW[k]||0));
   }))<0.02;
-if(!shouldUpdate||sameModel){
-  // Still store a hold verdict so owner can see learner's assessment
+if(!shouldUpdate||sameModel||!readyToSurface){
+  // Not ready to surface — store internally but stay silent
   if(!sameModel){
     var curT5Early=Object.entries(buildCombinedScore(sorted,preds,letter).scores)
       .sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];});
     db.shops[letter].learnerAlert={
       ts:Date.now(),hitGain:hitGain,applied:false,needsAlert:true,
-      alertReason:!btPositive
-        ?'Backtest shows no improvement over '+TEST_N+' refills \u2014 holding current model'
-        :'Not enough consistent signal yet \u2014 holding current model',
+      readyToSurface:false,
+      alertReason:!enoughObservations
+        ?'Accumulating data \u2014 '+snaps.length+' refill'+(snaps.length===1?'':'s')+' observed so far'
+        :!btNMeaningful
+          ?'Backtest window ('+TEST_N+') smaller than observation window ('+snaps.length+') \u2014 collecting more data'
+          :!consistencyAgreesWithBT
+            ?'Signal not consistent enough yet \u2014 '+Math.round(consistency*100)+'% consistent across '+snaps.length+' refills'
+            :'Backtest shows no improvement \u2014 holding current model',
       consistencyPct:Math.round(consistency*100),snapshotCount:snaps.length,
       currentHits:currentHits,learnedHits:learnedHits,testN:TEST_N,
       btAnchorRate:btLearned?btLearned.hitRate:null,
@@ -2588,6 +2637,7 @@ var sigChanges=SIGNAL_KEYS.map(function(k){
 var btDiff=btDiffVal;
 db.shops[letter].learnerAlert={
   ts:Date.now(),hitGain:hitGain,applied:!needsAlert,needsAlert:needsAlert,
+  readyToSurface:true,
   alertReason:needsAlert?alertReason:null,
   avgGain:Math.round(snaps.reduce(function(s,x){return s+x.hitGain;},0)/snaps.length*10)/10,
   consistencyPct:Math.round(consistency*100),snapshotCount:snaps.length,
@@ -2703,10 +2753,11 @@ preds.forEach(function(p,idx){
       if(LIFT_EXCLUDE.indexOf(k)>-1) return;
       var sv=snap[k]||0;
       if(sv>0){
-        // Surprise: signal was high but code wasn't predicted &#x2192; boost that signal
-        // Weighted 0.7\u00D7 since model didn't act on it (less certain than confirmed pred)
-        sigLift[k]+=(0.5)*(sv-0.5)*4*recWeight*0.7;
-        sigCount[k]+=recWeight*0.7;
+        // Surprise: appeared but not predicted — full weight, definitive signal
+        // Regime-weighted: stable surprises count more than shift surprises
+        var regW=p.regimeAtTime&&p.regimeAtTime.shifting?0.7:1.0;
+        sigLift[k]+=(0.5)*(sv-0.5)*4*recWeight*regW;
+        sigCount[k]+=recWeight*regW;
       }
     });
   });
@@ -2831,13 +2882,14 @@ db=loadDB();
 if(!resolvedPred||!resolvedPred.outcome) return {decisions:[], gradDecisions:[]};
 var obs   = shopObs(letter);
 var grad  = shopGrad(letter);
-var snap  = resolvedPred.signalSnapshot||{};
+// Use frozenSnapshots if available, fall back to signalSnapshot
+var isCompact=!!(resolvedPred.frozenSnapshots&&resolvedPred.modelVersion);
+var rawSnap=getSnapshotForPred(resolvedPred);
+var decompSnap=decompressSnap(rawSnap,isCompact);
 var wAtTime = resolvedPred.weightsAtTime||{};
 var decisions = [];
-var sigLabels = {freq:'Frequency',recency:'Recency',streak:'Streak',
-bias:'Pred. accuracy',cooccur:'Co-occurrence',interval:'Interval',
-dow:'Day-of-week',cycle:'Cycle',overdue:'Overdue',
-qtydom:'Qty dominance',qtystreak:'Qty streak'};
+var regimeShifting=resolvedPred.regimeAtTime&&resolvedPred.regimeAtTime.shifting;
+
 resolvedPred.predictedCodes.forEach(function(code){
 var outcome = resolvedPred.outcome[code];
 var isMiss  = outcome==='miss';
@@ -2847,68 +2899,68 @@ var cobs = obs[code];
 cobs.history.push(outcome);
 if(cobs.history.length>5) cobs.history.shift();
 var prevState = cobs.state;
-if(isMiss){
-cobs.consecMisses++;
-cobs.consecHits=0;
-if(cobs.state==='idle'&&cobs.consecMisses===1){
-cobs.state='watching';
-cobs.penaltyApplied=OBS_SOFT_PENALTY;
-decisions.push({code:code,action:'watching',
-message:'1st miss \u2014 watching. Soft penalty ('+Math.round((1-OBS_SOFT_PENALTY)*100)+'%) held in reserve until confirmed.',
-severity:'info', prevState:prevState, newState:'watching'});
-} else if(cobs.state==='watching'&&cobs.consecMisses>=OBS_MIN_N){
-cobs.state='confirmed';
-cobs.penaltyApplied=OBS_HARD_PENALTY;
-cobs.confirmedAt=resolvedPred.actualDate;
-var topSig=SIGNAL_KEYS.map(function(k){
-return {k:k,c:(snap[code]&&snap[code][k]||0)*(wAtTime[k]||0)};
-}).sort(function(a,b){return b.c-a.c;})[0];
-cobs.confirmedSignal=topSig?topSig.k:null;
-decisions.push({code:code,action:'confirmed',
-message:cobs.consecMisses+' consecutive misses confirmed. Hard penalty applied ('+Math.round((1-OBS_HARD_PENALTY)*100)+'%). '
-+(topSig?sigLabels[topSig.k]+' signal flagged as counter-predictive for this code.':''),
-severity:'danger', prevState:prevState, newState:'confirmed',
-signal:topSig?topSig.k:null});
-} else if(cobs.state==='confirmed'){
-cobs.penaltyApplied=OBS_HARD_PENALTY;
-decisions.push({code:code,action:'confirmed_ongoing',
-message:'Miss #'+cobs.consecMisses+' \u2014 still confirmed. Penalty maintained.',
-severity:'danger', prevState:prevState, newState:'confirmed'});
-} else if(cobs.state==='recovering'){
-cobs.state='watching';
-cobs.consecHits=0;
-cobs.penaltyApplied=OBS_SOFT_PENALTY;
-decisions.push({code:code,action:'relapsed',
-message:'Missed again after partial recovery. Back to watching.',
-severity:'warning', prevState:prevState, newState:'watching'});
-}
+
+if(isHit){
+  // Hits build confidence: idle→watching→confirmed
+  cobs.consecHits++;
+  cobs.consecMisses=0;
+  if(cobs.state==='idle'&&cobs.consecHits===1){
+    cobs.state='watching';
+    cobs.penaltyApplied=1.0; // neutral — watching
+    decisions.push({code:code,action:'watching',
+    message:'Appeared after prediction — watching. '
+      +(regimeShifting?'Regime shift: this hit supports new pattern.':''),
+    severity:'info',prevState:prevState,newState:'watching'});
+  } else if((cobs.state==='watching'||cobs.state==='recovering')&&cobs.consecHits>=2){
+    cobs.state='confirmed';
+    // CONFIRMED = boost: code is reliably appearing after prediction
+    // Stronger boost during regime shift (evidence new pattern is real)
+    cobs.penaltyApplied=regimeShifting?1.25:1.15;
+    decisions.push({code:code,action:'confirmed',
+    message:cobs.consecHits+' consecutive hits — pattern confirmed. Score boosted '
+      +(regimeShifting?'(regime shift: +25%)':'(+15%)'),
+    severity:'positive',prevState:prevState,newState:'confirmed'});
+  } else if(cobs.state==='confirmed'){
+    cobs.penaltyApplied=regimeShifting?1.25:1.15; // maintain boost
+  } else if(cobs.state==='overdue'&&cobs.consecHits>=1){
+    cobs.state='recovering';
+    cobs.penaltyApplied=1.0;
+    decisions.push({code:code,action:'recovering',
+    message:'Code returned after absence. Recovering — penalty lifted.',
+    severity:'warning',prevState:prevState,newState:'recovering'});
+  }
 } else {
-cobs.consecHits++;
-cobs.consecMisses=0;
-if(cobs.state==='confirmed'&&cobs.consecHits===1){
-cobs.state='recovering';
-cobs.penaltyApplied=Math.max(OBS_SOFT_PENALTY, 1.0-(1.0-OBS_HARD_PENALTY)*0.5);
-decisions.push({code:code,action:'recovering',
-message:'Code returned after confirmed absence. Recovery phase started. '
-+'Need '+( OBS_RECOVER_HITS-1)+' more hit'+(OBS_RECOVER_HITS>2?'s':'')+' to fully restore.',
-severity:'warning', prevState:prevState, newState:'recovering'});
-} else if(cobs.state==='recovering'&&cobs.consecHits>=OBS_RECOVER_HITS){
-cobs.state='idle';
-cobs.penaltyApplied=1.0;
-cobs.confirmedSignal=null;
-decisions.push({code:code,action:'recovered',
-message:'Code '+code+' fully recovered. Penalty removed. Window reset.',
-severity:'positive', prevState:prevState, newState:'idle'});
-} else if(cobs.state==='watching'&&cobs.consecHits>=1){
-cobs.state='idle';
-cobs.consecMisses=0;
-cobs.penaltyApplied=1.0;
-decisions.push({code:code,action:'cleared',
-message:'Code appeared \u2014 single miss cleared. Window reset.',
-severity:'positive', prevState:prevState, newState:'idle'});
-}
+  // Misses build overdue state
+  cobs.consecMisses++;
+  cobs.consecHits=0;
+  if(cobs.state==='confirmed'){
+    cobs.state='watching'; // one miss breaks confirmation
+    cobs.penaltyApplied=1.0;
+    decisions.push({code:code,action:'conf_broken',
+    message:'Missed after confirmation — reset to watching.',
+    severity:'warning',prevState:prevState,newState:'watching'});
+  } else if(cobs.state==='idle'||cobs.state==='watching'){
+    if(cobs.consecMisses>=OBS_MIN_N){
+      cobs.state='overdue';
+      cobs.penaltyApplied=OBS_SOFT_PENALTY; // mild penalty — overdue codes
+      decisions.push({code:code,action:'overdue',
+      message:cobs.consecMisses+' consecutive misses — marked overdue. Mild penalty applied.',
+      severity:'danger',prevState:prevState,newState:'overdue'});
+    }
+  } else if(cobs.state==='overdue'){
+    if(cobs.consecMisses>=OBS_MAX_N){
+      cobs.penaltyApplied=OBS_HARD_PENALTY; // escalate after many misses
+    }
+  } else if(cobs.state==='recovering'){
+    cobs.state='watching';
+    cobs.penaltyApplied=1.0;
+    decisions.push({code:code,action:'relapsed',
+    message:'Missed again after recovery — back to watching.',
+    severity:'warning',prevState:prevState,newState:'watching'});
+  }
 }
 });
+
 var gradDecisions = [];
 var wCurrent = getWeights(letter);
 var wBefore  = Object.assign({},wCurrent);
@@ -2917,9 +2969,12 @@ SIGNAL_KEYS.forEach(function(k){
 if(!grad[k]) grad[k]=[];
 var totalGrad=0;
 resolvedPred.predictedCodes.forEach(function(code){
-var sigVal=(snap[code]&&snap[code][k])||0;
+var snap=decompSnap[code]||{};
+var sigVal=(snap[k])||0;
 var isHit=resolvedPred.outcome[code]==='hit'?1:0;
-totalGrad += LEARNING_RATE*(isHit-0.5)*sigVal;
+// Regime weighting in gradient — stable predictions drive learning more
+var rw=regimeShifting?0.6:1.0;
+totalGrad += LEARNING_RATE*(isHit-0.5)*sigVal*rw;
 });
 grad[k].push({val:totalGrad, date:resolvedPred.actualDate||resolvedPred.createdDate});
 if(grad[k].length>GRAD_MIN_N) grad[k].shift();
@@ -2931,20 +2986,11 @@ var direction = positives>=GRAD_MIN_N?1:-1;
 var avgGrad   = grad[k].reduce(function(a,g){return a+g.val;},0)/grad[k].length;
 wCurrent[k]   = (wCurrent[k]||DEFAULT_WEIGHTS[k])+avgGrad;
 changed       = true;
-gradDecisions.push({signal:k,label:sigLabels[k],
-direction:direction>0?'up':'down',
-gradients:grad[k].map(function(g){return g.val>0?'+':'\u2212';}),
+gradDecisions.push({signal:k,direction:direction>0?'up':'down',
 delta:Math.round(avgGrad*100*10)/10,
 from:Math.round(wBefore[k]*100),
-to:Math.round(wCurrent[k]*100),
-reason:direction>0?'Consistently drove correct predictions':'Consistently drove missed predictions'
-});
+to:Math.round(wCurrent[k]*100)});
 grad[k]=[];
-} else {
-gradDecisions.push({signal:k,label:sigLabels[k],
-direction:'mixed', gradients:grad[k].map(function(g){return g.val>0?'+':'\u2212';}),
-reason:'Mixed signal \u2014 gradients disagree. Not applied (noise protection).',
-delta:0});
 }
 }
 });
@@ -3312,6 +3358,10 @@ db.shops[letter].predictions=resolvedPreds;
 db.shops[letter].lastFullScores=frozenScores;
 // Top-5 display scores (normalised 0-100)
 var top5Scores=top5.reduce(function(o,x){o[x[0]]=Math.round(x[1]/top5Max*100);return o;},{});
+// Freeze plain english summary and confidence at prediction time
+var top5CodesFreeze=top5.map(function(x){return x[0];});
+var frozenSummary=buildPlainEnglishSummary(entries,preds,top5CodesFreeze,result,letter)||'';
+var frozenConf=buildRefillConfidenceScore(entries,preds,top5CodesFreeze,result,letter)||null;
 var predId=Date.now();
 // Always save snapshot to external store \u2014 learner can analyze anytime
 saveSnapshot(predId,compactSnaps);
@@ -3334,6 +3384,8 @@ db.shops[letter].predictions.push({
   frozenScores:frozenScores,
   frozenSnapshots:embedInline?compactSnaps:null, // inline for recent, external store for all
   weightsAtTime:Object.assign({},result.weights),
+  frozenSummary:frozenSummary,
+  frozenConf:frozenConf,
   status:'pending',
   outcome:null,
   actualDate:null,
@@ -3684,7 +3736,9 @@ function renderLearnerAlert(letter){
   db=loadDB();
   var a=db.shops[letter]&&db.shops[letter].learnerAlert;
   if(!a||a.hitGain===undefined){el.style.display='none';return;}
-  // Always show if learner has run — even hold verdict
+  // Stay silent if learner hasn't cross-checked its own evidence yet
+  if(a.readyToSurface===false){el.style.display='none';return;}
+  // Always show if learner has run and is ready — even hold verdict
   if(!a.btAnchorRate&&(!a.hitGain||a.hitGain<=0)){el.style.display='none';return;}
   el.style.display='block';
   var boost=(a.topBoost||[]).map(function(s){return (SIGNAL_NAMES[s.k]||s.k)+' &#x2191;';}).join(', ');
@@ -3720,13 +3774,18 @@ function renderLearnerAlert(letter){
     var headerIcon=isHold?'&#x23F8;':isAnchor?'&#x2605;':'&#x26A0;&#xFE0F;';
     var headerText=isAnchor
       ?(isHold?'Anchor '+a.anchorDate+' \u2014 Hold current model':'Anchor '+a.anchorDate+' \u2014 Apply this model')
-      :(isHold?'Hold current model':'Review before applying');
+      :(isHold&&a.btDiff===0?'No improvement found'
+        :isHold?'Hold current model'
+        :'Review before applying');
+    var subText=isAnchor?a.alertReason
+      :(a.btN&&a.btN<5?a.alertReason+' (only '+a.btN+' refills tested)'
+        :a.alertReason);
     el.innerHTML='<div class="learner-card" style="border-color:'+headerColor+'">'
       +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">'
         +'<span style="font-size:16px">'+headerIcon+'</span>'
         +'<div>'
           +'<div style="font-size:12px;font-weight:700;color:'+headerColor+'">'+headerText+'</div>'
-          +'<div style="font-size:10px;color:var(--muted)">'+a.alertReason+'</div>'
+          +'<div style="font-size:10px;color:var(--muted)">'+subText+'</div>'
         +'</div>'
       +'</div>'
       +btHTML
@@ -4091,41 +4150,68 @@ function handleImportFile(evt){
 function renderPredictTab(){
   if(!activeShop){
     ['signal-perf-panel','refill-confidence','plain-english','prediction-codes','pairs-panel']
-      .forEach(function(id){
-        var el=document.getElementById(id);
-        if(el) el.innerHTML='<div class="empty"><p>Select a shop</p></div>';
-      });
+      .forEach(function(id){var el=document.getElementById(id);if(el)el.innerHTML='<div class="empty"><p>Select a shop</p></div>';});
     return;
   }
   db=loadDB();
-  var entries=shopEntries(activeShop);
   var preds=shopPreds(activeShop);
-  if(entries.length<3){
-    ['signal-perf-panel','refill-confidence','prediction-codes','pairs-panel']
-      .forEach(function(id){
-        var el=document.getElementById(id);
-        if(el) el.innerHTML='<div class="empty"><p>Need 3+ entries</p></div>';
-      });
+  var entries=shopEntries(activeShop);
+
+  // Get frozen pending prediction
+  var pending=preds.filter(function(p){return p.status==='pending';});
+  var pred=pending.length?pending[pending.length-1]:null;
+
+  // Accept pred if it has frozenScores OR scores (older predictions may use scores only)
+  var predScores=pred&&(pred.frozenScores&&Object.keys(pred.frozenScores).length
+    ?pred.frozenScores
+    :pred.scores&&Object.keys(pred.scores||{}).length?pred.scores:null);
+
+  if(!pred||!predScores){
+    ['refill-confidence','plain-english','prediction-codes']
+      .forEach(function(id){var el=document.getElementById(id);
+        if(el)el.innerHTML='<div class="empty"><p>No prediction yet — run Rebuild</p></div>';});
+    document.getElementById('signal-perf-panel').innerHTML='';
+    document.getElementById('pairs-panel').innerHTML='';
+    renderLearnerAlert(activeShop);
     return;
   }
+
   try{
-    var result=buildCombinedScore(entries,preds,activeShop);
-    var scores=result.scores;
-    var snaps=result.snapshots;
-    var weights=result.weights;
-    if(!scores||!Object.keys(scores).length){
-      document.getElementById('prediction-codes').innerHTML=
-        '<div class="alert alert-warn">No scores for '+activeShop+' ('+entries.length+' entries, '+preds.length+' preds)</div>';
-      return;
-    }
-    renderSignalPerf(weights,preds,snaps,scores);
-    renderConfidenceScore(entries,preds,result);
-    renderPredictionCodes(result,entries,preds);
-    renderPairs(entries,scores);
+    var frozenScores=predScores;
+    var weightsAtFreezeTime=pred.weightsAtTime||getWeights(activeShop);
+    var isCompact=!!(pred.frozenSnapshots&&pred.modelVersion);
+    var rawSnap=getSnapshotForPred(pred);
+    var snapByCode=decompressSnap(rawSnap,isCompact);
+
+    // Build a result-like object from frozen data for render functions
+    var frozenResult={
+      scores:frozenScores,
+      snapshots:snapByCode,
+      weights:weightsAtFreezeTime,
+      regime:pred.regimeAtTime||null,
+      signalLifts:null,
+      frozenConf:pred.frozenConf||null,
+      frozenSummary:pred.frozenSummary||null
+    };
+
+    // Signals — reads from stored performanceAnalysis (frozen by learner)
+    renderSignalPerf(weightsAtFreezeTime,preds,snapByCode,frozenScores);
+
+    // Confidence and plain English — from frozen data
+    renderConfidenceScore(entries,preds,frozenResult);
+
+    // Prediction codes — from frozen prediction only
+    renderPredictionCodes(null,entries,preds,pred);
+
+    // Pairs — from entries history (static co-occurrence, no model recalc)
+    renderPairs(entries,frozenScores);
+
+    // Learner — background only
     renderLearnerAlert(activeShop);
+
   }catch(e){
     var el=document.getElementById('prediction-codes');
-    if(el) el.innerHTML='<div class="alert alert-err">Predict error: '+e.message+'<br><small>'+activeShop+' · '+entries.length+' entries · '+preds.length+' preds</small></div>';
+    if(el) el.innerHTML='<div class="alert alert-err">Predict error: '+e.message+'</div>';
   }
 }
 
@@ -4137,24 +4223,42 @@ function renderSignalPerf(weights,preds,snaps,scores){
   var sigEff=analysis&&analysis.sigEffectiveness||{};
   var missed=analysis&&analysis.missedOpportunities||[];
 
-  // Signal bars with effectiveness from analysis
-  var html=SIGNAL_KEYS.map(function(k){
+  // Signal profile — per-shop effectiveness
+  var html='<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Signal profile for '+activeShop+'</div>';
+  html+=SIGNAL_KEYS.map(function(k){
     var w=Math.round((weights[k]||DEFAULT_WEIGHTS[k])*100);
     var col=SIGNAL_COLORS[k]||'var(--accent)';
     var eff=sigEff[k];
-    var liftStr='',liftCol='var(--muted)';
-    if(eff&&eff.lift!==null){
+    var liftStr='',liftCol='var(--muted)',statusDot='';
+
+    if(eff&&eff.lift!==null&&eff.n>=3){
       var lift=Math.round(eff.lift*100);
-      if(eff.label==='predictive'){liftStr='&#x2191; +'+lift+'%';liftCol='var(--green)';}
-      else if(eff.label==='counter'){liftStr='&#x2193; '+lift+'%';liftCol='var(--red)';}
-      else if(eff.label==='weak'){liftStr='&#x2191; +'+lift+'%';liftCol='var(--muted)';}
-      else{liftStr='&#x2192; neutral';liftCol='var(--muted)';}
+      if(eff.lift>0.05){
+        liftStr='\u2191 working ('+lift+'%, '+eff.n+'obs)';
+        liftCol='var(--green)';
+        statusDot='<span style="color:var(--green);font-size:8px">\u25CF</span>';
+      } else if(eff.lift<-0.10){
+        liftStr='\u2193 suppressed ('+lift+'%, '+eff.n+'obs)';
+        liftCol='var(--red)';
+        statusDot='<span style="color:var(--red);font-size:8px">\u25CF</span>';
+      } else {
+        liftStr='neutral ('+lift+'%, '+eff.n+'obs)';
+        liftCol='var(--muted)';
+        statusDot='<span style="color:var(--muted);font-size:8px">\u25CB</span>';
+      }
+    } else if(eff&&eff.n>0){
+      liftStr='insufficient data ('+eff.n+'obs)';
+      liftCol='var(--muted)';
+      statusDot='<span style="color:var(--muted);font-size:8px">\u25A1</span>';
     } else {
       liftStr='no data yet';
+      liftCol='var(--muted)';
+      statusDot='<span style="color:var(--muted);font-size:8px">\u25A1</span>';
     }
+
     return '<div class="sig-bar-wrap">'
       +'<div class="sig-bar-row">'
-        +'<span class="sig-bar-name">'+((SIGNAL_NAMES&&SIGNAL_NAMES[k])||k)+'</span>'
+        +'<span class="sig-bar-name">'+statusDot+' '+((SIGNAL_NAMES&&SIGNAL_NAMES[k])||k)+'</span>'
         +'<div class="sig-bar-track"><div class="sig-bar-fill" style="width:'+w+'%;background:'+col+'"></div></div>'
         +'<span class="sig-bar-val" style="color:'+col+'">'+w+'%</span>'
         +'<span class="sig-bar-lift" style="color:'+liftCol+'">'+liftStr+'</span>'
@@ -4162,7 +4266,7 @@ function renderSignalPerf(weights,preds,snaps,scores){
       +'</div>';
   }).join('');
 
-  // Missed opportunities (Q2 \u2014 what should have been predicted)
+  // Missed opportunities
   if(missed.length){
     html+='<div style="margin-top:10px;font-size:10px;font-weight:700;color:var(--muted);'
       +'text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Missed opportunities</div>';
@@ -4170,7 +4274,7 @@ function renderSignalPerf(weights,preds,snaps,scores){
       var topSigNames=m.topSignals.map(function(s){return SIGNAL_NAMES[s.k]||s.k;}).join(', ');
       return '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border)">'
         +'<span class="mono" style="font-weight:900;color:var(--gold);min-width:28px">'+m.code+'</span>'
-        +'<span style="font-size:11px;color:var(--muted);flex:1">missed '+m.missCount+'\u00D7 &#xB7; signals: '+topSigNames+'</span>'
+        +'<span style="font-size:11px;color:var(--muted);flex:1">missed '+m.missCount+'\u00D7 \u00B7 signals: '+topSigNames+'</span>'
       +'</div>';
     }).join('');
   }
@@ -4181,8 +4285,13 @@ function renderSignalPerf(weights,preds,snaps,scores){
 function renderConfidenceScore(entries,preds,result){
   var el=document.getElementById('refill-confidence');
   if(!el) return;
-  var top5Codes=Object.entries(result.scores).sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];});
-  var rcs=buildRefillConfidenceScore(entries,preds,top5Codes,result,activeShop);
+  // Use frozen confidence if available, otherwise compute from result
+  var rcs=result.frozenConf||null;
+  if(!rcs){
+    var allScores=result.scores||result.frozenScores||{};
+    var top5Codes=Object.entries(allScores).sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];});
+    rcs=buildRefillConfidenceScore(entries,preds,top5Codes,result,activeShop);
+  }
   var adapted=rcs.adapted;
   el.innerHTML='<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border);margin-bottom:8px">'
     +'<span style="font-size:28px;font-weight:900;font-family:var(--mono);color:'+rcs.col+'">'+rcs.score+'</span>'
@@ -4198,80 +4307,142 @@ function renderConfidenceScore(entries,preds,result){
   // Plain English
   var pe=document.getElementById('plain-english');
   if(pe){
-    var top5CodesForSummary=Object.entries(result.scores).sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];});
-    var peText=buildPlainEnglishSummary(entries,preds,top5CodesForSummary,result,activeShop);
+    // Use frozen summary if available
+    var peText=result.frozenSummary||null;
+    if(!peText){
+      var top5CodesForSummary=Object.entries(result.scores).sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];});
+      peText=buildPlainEnglishSummary(entries,preds,top5CodesForSummary,result,activeShop);
+    }
     pe.innerHTML=peText?'<div style="font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:6px">'+peText+'</div>':'';
   }
 }
 
-function renderPredictionCodes(result,entries,preds){
+function buildCodeHitRate(code, preds){
+  var resolved=preds.filter(function(p){
+    return p.status!=='pending'&&p.outcome&&p.predictedCodes&&
+           p.predictedCodes.indexOf(code)>-1;
+  });
+  if(resolved.length<3) return null;
+  var hits=resolved.filter(function(p){return p.outcome[code]==='hit';}).length;
+  return {predicted:resolved.length, hits:hits,
+          rate:Math.round(hits/resolved.length*100)};
+}
+
+function renderPredictionCodes(result,entries,preds,frozenPred){
   var el=document.getElementById('prediction-codes');
   if(!el) return;
 
-  var scores=result.scores;
-  var snaps=result.snapshots;
-  var weights=result.weights;
-  var fullMax=Math.max.apply(null,Object.values(scores).concat([0.001]));
+  // Accept frozenScores (new) or scores (old format)
+  var predScores=frozenPred&&(
+    (frozenPred.frozenScores&&Object.keys(frozenPred.frozenScores).length)?frozenPred.frozenScores:
+    (frozenPred.scores&&Object.keys(frozenPred.scores||{}).length)?frozenPred.scores:null
+  );
 
-  var ranked=Object.entries(scores).sort(function(a,b){return b[1]-a[1];});
-  var top5=ranked.slice(0,5);
-  var top5Codes=top5.map(function(x){return x[0];});
-  // Build promotions via applyEmergentToTop3
-  var patterns=buildEmergentPatterns(entries,preds)||[];
-  var appliedResult=applyEmergentToTop3(top5.slice(),patterns,scores);
-  var promoted=appliedResult.promotions||[];
-  // Build watchouts: (entries, predictions, bcsResult, top5Codes, letter)
-  var watchouts=buildWatchouts(entries,preds,result,top5Codes,activeShop)||[];
+  if(!frozenPred||!predScores){
+    el.innerHTML='<div class="empty"><p>No frozen prediction — run Rebuild</p></div>';
+    return;
+  }
 
-  var lt=db.shops[activeShop]&&db.shops[activeShop].learnedThresholds||null;
+  var frozen=predScores;
+  var weights=frozenPred.weightsAtTime||{};
+  var fullMax=Math.max.apply(null,Object.values(frozen).concat([1]));
+  var top5Codes=frozenPred.predictedCodes||[];
+  // Deduplicate promoted and watchout arrays
+  var seen=[];
+  var promoted=(frozenPred.promotedCodes||[]).filter(function(c){
+    if(seen.indexOf(c)>-1) return false; seen.push(c); return true;
+  });
+  var seen2=[];
+  var watchouts=(frozenPred.watchoutCodes||[]).filter(function(c){
+    if(seen2.indexOf(c)>-1) return false; seen2.push(c); return true;
+  });
 
-  function codeRow(c,type,scorePct){
-    var snap=snaps[c]||{};
+  // Decompress frozen snapshots — these are the signal values at freeze time
+  var isCompact=!!(frozenPred.frozenSnapshots&&frozenPred.modelVersion);
+  var rawSnap=getSnapshotForPred(frozenPred);
+  var snapByCode=decompressSnap(rawSnap,isCompact);
+
+  // Sort top5 by grade (A→B→C→D→N) then combinedPct within same grade
+  var gradeOrder={A:0,B:1,C:2,D:3,N:4};
+  top5Codes=top5Codes.slice().sort(function(a,b){
+    var aPct=Math.round((frozen[a]||0)/fullMax*100);
+    var bPct=Math.round((frozen[b]||0)/fullMax*100);
+    var aGrade=buildCodeConfidenceGrade(a,snapByCode[a]||{},weights,entries,preds,activeShop,aPct);
+    var bGrade=buildCodeConfidenceGrade(b,snapByCode[b]||{},weights,entries,preds,activeShop,bPct);
+    var aOrder=gradeOrder[aGrade.grade]!==undefined?gradeOrder[aGrade.grade]:5;
+    var bOrder=gradeOrder[bGrade.grade]!==undefined?gradeOrder[bGrade.grade]:5;
+    if(aOrder!==bOrder) return aOrder-bOrder;
+    var aHR=buildCodeHitRate(a,preds);
+    var bHR=buildCodeHitRate(b,preds);
+    var aCombined=aHR?Math.round(aPct*0.5+aHR.rate*0.5):aPct;
+    var bCombined=bHR?Math.round(bPct*0.5+bHR.rate*0.5):bPct;
+    return bCombined-aCombined;
+  });
+
+  function frozenRow(c,type){
+    var scorePct=Math.round((frozen[c]||0)/fullMax*100);
+    var snap=snapByCode[c]||{};
     var consensus=buildSignalConsensus(c,snap,weights,weights);
-    var topDriving=consensus.yesSignals.slice(0,2).map(function(k){return SIGNAL_NAMES&&SIGNAL_NAMES[k]||k;}).join(' &#xB7; ');
+    var topDriving=consensus.yesSignals.slice(0,2).map(function(k){return SIGNAL_NAMES&&SIGNAL_NAMES[k]||k;}).join(' \u00B7 ');
     var grade=buildCodeConfidenceGrade(c,snap,weights,entries,preds,activeShop,scorePct);
     var typeIcon=type==='top5'?'':type==='promoted'?'&#x1F52C;':type==='watchout'?'&#x26A0;&#xFE0F;':'&#x1F3AF;';
     var col=type==='top5'?'var(--text)':type==='promoted'?'var(--green)':type==='watchout'?'var(--gold)':'var(--teal)';
+
+    // Per-code historical hit rate (2nd number)
+    var hr=buildCodeHitRate(c,preds);
+    // Combined indicator: weighted blend of signal strength and historical hit rate
+    var combinedPct, combinedCol, combinedLabel;
+    if(hr){
+      combinedPct=Math.round(scorePct*0.5 + hr.rate*0.5);
+      combinedCol=combinedPct>=60?'var(--green)':combinedPct>=35?'var(--gold)':'var(--red)';
+      combinedLabel=combinedPct+'%';
+    } else {
+      combinedPct=scorePct;
+      combinedCol='var(--muted)';
+      combinedLabel=scorePct+'%';
+    }
+    var hrDisplay=hr
+      ?'<span style="color:var(--muted);font-size:10px;font-family:var(--mono)"> \u00B7 '+hr.rate+'%('+hr.predicted+')</span>'
+      :'<span style="color:var(--muted);font-size:10px"> \u00B7 N/A</span>';
+
+    // Obs window state
+    var obsState=(db.shops[activeShop]&&db.shops[activeShop].obsWindow&&
+      db.shops[activeShop].obsWindow[c])||{state:'idle'};
+    var obsLabel='';
+    var obsCol='var(--muted)';
+    if(obsState.state==='confirmed'){obsLabel='CONFIRMED';obsCol='var(--green)';}
+    else if(obsState.state==='watching'){obsLabel='WATCHING';obsCol='var(--gold)';}
+    else if(obsState.state==='overdue'){obsLabel='OVERDUE';obsCol='var(--red)';}
+    else if(obsState.state==='recovering'){obsLabel='RECOVERING';obsCol='var(--muted)';}
+
     return '<div class="pred-code-row">'
       +(typeIcon?'<span style="font-size:11px;min-width:16px">'+typeIcon+'</span>':'<span style="min-width:16px"></span>')
       +'<span class="pred-code" style="color:'+col+'">'+c+'</span>'
       +'<span class="pred-grade" style="color:'+grade.col+'">['+grade.grade+']'
         +(grade.adapted?'<sup style="color:var(--green);font-size:7px">&#x2605;</sup>':'')
+        +(obsLabel?'<span style="font-size:8px;color:'+obsCol+';margin-left:3px">'+obsLabel+'</span>':'')
       +'</span>'
-      +'<div class="pred-bar-track"><div class="pred-bar-fill" style="width:'+scorePct+'%;background:'+(consensus.yesSignals.length?SIGNAL_COLORS[consensus.yesSignals[0]]||'var(--accent)':'var(--muted)')+'"></div></div>'
-      +'<span class="pred-pct">'+scorePct+'%</span>'
-      +'<span class="pred-sigs">'+topDriving+'</span>'
+      +'<div class="pred-bar-track"><div class="pred-bar-fill" style="width:'+combinedPct+'%;background:'+combinedCol+'"></div></div>'
+      +'<span class="pred-pct" style="color:'+combinedCol+';font-weight:700">'+combinedLabel
+        +(hr?'<span style="color:'+(hr.rate>=50?'var(--green)':hr.rate>=30?'var(--gold)':'var(--red)')+';font-size:10px;font-family:var(--mono)"> \u00B7 '+hr.rate+'%('+hr.predicted+')</span>'
+            :'<span style="color:var(--muted);font-size:10px"> \u00B7 N/A</span>')
+      +'</span>'
+      +'<span class="pred-sigs" style="font-size:9px;color:var(--muted)">'+topDriving+'</span>'
       +'</div>';
   }
 
   var html='';
-
-  // Top-5
-  html+=top5.map(function(x){
-    var pct=Math.round(x[1]/fullMax*100);
-    return codeRow(x[0],'top5',pct);
-  }).join('');
-
-  // Promoted
-  var promoExtra=promoted.filter(function(p){return top5Codes.indexOf(p.promoted)===-1;});
+  html+=top5Codes.map(function(c){return frozenRow(c,'top5');}).join('');
+  var promoExtra=promoted.filter(function(c){return top5Codes.indexOf(c)===-1;});
   if(promoExtra.length){
     html+='<div class="pred-divider"></div>';
-    html+=promoExtra.map(function(p){
-      var pct=Math.round((scores[p.promoted]||0)/fullMax*100);
-      return codeRow(p.promoted,'promoted',pct);
-    }).join('');
+    html+=promoExtra.map(function(c){return frozenRow(c,'promoted');}).join('');
   }
-
-  // Watchouts
-  var wExtra=watchouts.filter(function(w){return top5Codes.indexOf(w.code)===-1&&promoExtra.indexOf(w)===-1;});
-  if(wExtra.length){
+  var watchExtra=watchouts.filter(function(c){return top5Codes.indexOf(c)===-1&&promoExtra.indexOf(c)===-1;});
+  if(watchExtra.length){
     html+='<div class="pred-divider"></div>';
-    html+=wExtra.map(function(w){
-      var pct=Math.round((scores[w.code]||0)/fullMax*100);
-      return codeRow(w.code,'watchout',pct);
-    }).join('');
+    html+=watchExtra.map(function(c){return frozenRow(c,'watchout');}).join('');
   }
-
   el.innerHTML=html||'<div class="empty"><p>No prediction available</p></div>';
 }
 
@@ -4358,6 +4529,7 @@ function renderTrackTab(){
     if(el) el.innerHTML=info+'<div class="alert alert-err">History error: '+e.message+'</div>';
     return;
   }
+  try{ renderModelHistory(); }catch(e){}
   try{ renderBestPredList(); }catch(e){}
 }
 
@@ -4384,29 +4556,75 @@ function renderTrackScore(){
     +(ms.hitRate!==null?'<span style="font-size:12px;color:var(--muted)">'+ms.hitRate+'% hit &#xB7; '+ms.slotCov+'% slot</span>':'')
     +'</div>';
 
-  // Per-code grade table from pending prediction
-  var pending=preds.filter(function(p){return p.status==='pending';})[0];
-  if(pending){
-    var result=buildCombinedScore(entries,preds,activeShop);
-    var scores=result.scores;
-    var snaps=result.snapshots;
-    var weights=result.weights;
-    var top5=Object.entries(scores).sort(function(a,b){return b[1]-a[1];}).slice(0,5);
-    var fullMax=Math.max.apply(null,Object.values(scores).concat([0.001]));
-    html+='<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Current prediction grades</div>';
-    html+=top5.map(function(x){
-      var c=x[0];
-      var pct=Math.round(x[1]/fullMax*100);
-      var snap=snaps[c]||{};
+  // Show frozen confidence number + grade from pending prediction (same as PREDICT)
+  var pendingForConf=preds.filter(function(p){return p.status==='pending';});
+  var frozenConfPred=pendingForConf.length?pendingForConf[pendingForConf.length-1]:null;
+  if(frozenConfPred&&frozenConfPred.frozenConf){
+    var fc=frozenConfPred.frozenConf;
+    var confNum=fc.score||fc.confidence||0;
+    var confGrade=fc.grade||'';
+    var confGradeCol=confGrade==='A'?'var(--green)':confGrade==='B'?'var(--green)':
+      confGrade==='C'?'var(--gold)':confGrade==='D'?'var(--red)':'var(--muted)';
+    if(confNum){
+      html='<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">'
+        +'<span style="font-size:32px;font-weight:900;font-family:var(--mono);color:'+confGradeCol+'">'+confNum+'</span>'
+        +'<div>'
+          +'<div style="font-size:14px;font-weight:700;color:'+confGradeCol+'">Grade '+confGrade+'</div>'
+          +'<div style="font-size:11px;color:var(--muted)">Refill confidence'
+            +(fc.adapted?'<span style="color:var(--green);margin-left:4px">&#x2605; adapted</span>':'')
+          +'</div>'
+        +'</div>'
+        +'<span class="conf-badge '+confCls+'" style="margin-left:auto">'+verdictLabel(ms.level)+'</span>'
+      +'</div>';
+    }
+  }
+
+  // Per-code grade table — read from frozen pending prediction (same source as PREDICT)
+  var pending=preds.filter(function(p){return p.status==='pending';});
+  var frozenPred=pending.length?pending[pending.length-1]:null;
+  if(frozenPred){
+    var predScores=frozenPred.frozenScores&&Object.keys(frozenPred.frozenScores).length
+      ?frozenPred.frozenScores
+      :frozenPred.scores||{};
+    var weights=frozenPred.weightsAtTime||{};
+    var isCompact=!!(frozenPred.frozenSnapshots&&frozenPred.modelVersion);
+    var rawSnap=getSnapshotForPred(frozenPred);
+    var snapByCode=decompressSnap(rawSnap,isCompact);
+    var top5Codes=frozenPred.predictedCodes||
+      Object.entries(predScores).sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];});
+    var fullMax=Math.max.apply(null,Object.values(predScores).concat([0.001]));
+    // Sort by grade then combinedPct — matches PREDICT display order
+    var gradeOrder={A:0,B:1,C:2,D:3,N:4};
+    top5Codes=top5Codes.slice().sort(function(a,b){
+      var aPct=Math.round((predScores[a]||0)/fullMax*100);
+      var bPct=Math.round((predScores[b]||0)/fullMax*100);
+      var aGrade=buildCodeConfidenceGrade(a,snapByCode[a]||{},weights,entries,preds,activeShop,aPct);
+      var bGrade=buildCodeConfidenceGrade(b,snapByCode[b]||{},weights,entries,preds,activeShop,bPct);
+      var aOrder=gradeOrder[aGrade.grade]!==undefined?gradeOrder[aGrade.grade]:5;
+      var bOrder=gradeOrder[bGrade.grade]!==undefined?gradeOrder[bGrade.grade]:5;
+      if(aOrder!==bOrder) return aOrder-bOrder;
+      var aHR=buildCodeHitRate(a,preds);
+      var bHR=buildCodeHitRate(b,preds);
+      var aCombined=aHR?Math.round(aPct*0.5+aHR.rate*0.5):aPct;
+      var bCombined=bHR?Math.round(bPct*0.5+bHR.rate*0.5):bPct;
+      return bCombined-aCombined;
+    });
+    html+='<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Frozen prediction grades</div>';
+    html+=top5Codes.map(function(c){
+      var pct=Math.round((predScores[c]||0)/fullMax*100);
+      var snap=snapByCode[c]||{};
       var grade=buildCodeConfidenceGrade(c,snap,weights,entries,preds,activeShop,pct);
+      var hr=buildCodeHitRate(c,preds);
+      var combined=hr?Math.round(pct*0.5+hr.rate*0.5):pct;
+      var combinedCol=combined>=60?'var(--green)':combined>=35?'var(--gold)':'var(--red)';
       var obsState=(obs[c]&&obs[c].state!=='idle')?'<span style="font-size:9px;color:var(--gold)"> '+obs[c].state.toUpperCase()+'</span>':'';
       return '<div style="display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid var(--border)">'
         +'<span class="mono" style="font-weight:900;min-width:28px;color:var(--accent)">'+c+'</span>'
         +'<span style="font-size:11px;font-weight:900;font-family:var(--mono);color:'+grade.col+'">['+grade.grade+']'+(grade.adapted?'<sup style="color:var(--green);font-size:7px">&#x2605;</sup>':'')+'</span>'
         +'<div style="flex:1;height:4px;background:var(--surface3);border-radius:2px;overflow:hidden">'
-          +'<div style="width:'+pct+'%;height:100%;background:'+grade.col+';border-radius:2px"></div>'
+          +'<div style="width:'+combined+'%;height:100%;background:'+combinedCol+';border-radius:2px"></div>'
         +'</div>'
-        +'<span style="font-size:11px;font-family:var(--mono);color:var(--muted)">'+pct+'%</span>'
+        +'<span style="font-size:11px;font-family:var(--mono);color:'+combinedCol+';font-weight:700">'+combined+'%</span>'
         +obsState
         +'</div>';
     }).join('');
@@ -4580,6 +4798,82 @@ function dismissLearnerAlert(isHold){
 // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
 // BEST PREDICTION ANCHOR (Track tab)
 // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+function renderModelHistory(){
+  var el=document.getElementById('model-history-panel');
+  if(!el||!activeShop) return;
+  db=loadDB();
+  var history=(db.shops[activeShop].modelHistory||[]).slice().reverse();
+  var preds=shopPreds(activeShop);
+
+  if(!history.length){
+    el.innerHTML='<div style="font-size:12px;color:var(--muted);padding:4px 0">No model decisions recorded yet. Apply or Hold a learner recommendation to start tracking.</div>';
+    return;
+  }
+
+  el.innerHTML=history.map(function(h){
+    var isApply=h.decision==='apply';
+    var col=isApply?'var(--green)':'var(--muted)';
+    var icon=isApply?'&#x2705;':'&#x23F8;';
+
+    // Signal changes
+    var sigChanges=[];
+    if(isApply&&h.weightsApplied&&h.weightsBefore){
+      Object.keys(h.weightsApplied).forEach(function(k){
+        if(k==='bias') return;
+        var delta=(h.weightsApplied[k]||0)-(h.weightsBefore[k]||0);
+        if(Math.abs(delta)>=0.01) sigChanges.push({k:k,delta:delta});
+      });
+      sigChanges.sort(function(a,b){return Math.abs(b.delta)-Math.abs(a.delta);});
+    }
+
+    // Hit rate before vs after
+    var afterPreds=h.predIdAtTime?preds.filter(function(p){
+      return p.status!=='pending'&&p.outcome&&p.modelVerId&&p.modelVerId>=h.id;
+    }):[];
+    var beforePreds=preds.filter(function(p){
+      return p.status!=='pending'&&p.outcome&&(!p.modelVerId||p.modelVerId<h.id);
+    });
+    function calcRate(ps){
+      var h2=0,t=0;
+      ps.forEach(function(p){Object.values(p.outcome).forEach(function(v){t++;if(v==='hit')h2++;});});
+      return t>=3?Math.round(h2/t*100):null;
+    }
+    var rateAfter=calcRate(afterPreds);
+    var rateBefore=calcRate(beforePreds);
+    var rateDelta=rateAfter!==null&&rateBefore!==null?rateAfter-rateBefore:null;
+
+    return '<div style="padding:8px 0;border-bottom:1px solid var(--border)">'
+      +'<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">'
+        +'<span style="font-size:13px">'+icon+'</span>'
+        +'<span style="font-size:12px;font-weight:700;color:'+col+'">'+(isApply?'Applied':'Held')+'</span>'
+        +'<span style="font-size:11px;color:var(--muted);margin-left:auto">'+h.date+'</span>'
+      +'</div>'
+      // Backtest result at decision time
+      +(h.btDiff!==null?'<div style="font-size:11px;color:var(--muted);margin-bottom:3px">'
+        +'Backtest at decision: '
+        +'<span style="color:'+(h.btDiff>0?'var(--green)':h.btDiff<0?'var(--red)':'var(--muted)')+';font-family:var(--mono);font-weight:700">'
+        +(h.btDiff>0?'\u2191+':h.btDiff<0?'\u2193':'\u2014')+h.btDiff+'%'
+        +'</span>'
+        +' over '+(h.btN||'?')+' refills'
+      +'</div>':'')
+      // Signal changes
+      +(sigChanges.length?'<div style="font-size:10px;color:var(--muted);margin-bottom:3px">'
+        +sigChanges.slice(0,3).map(function(s){
+          return '<span style="color:'+(s.delta>0?'var(--green)':'var(--red)')+'">'
+            +(SIGNAL_NAMES[s.k]||s.k)+' '+(s.delta>0?'\u2191':'\u2193')
+            +'</span>';
+        }).join(' \u00B7 ')
+      +'</div>':'')
+      // Hit rate before vs after
+      +(rateBefore!==null||rateAfter!==null?'<div style="font-size:11px;color:var(--muted)">'
+        +(rateBefore!==null?'Before: <span style="font-family:var(--mono);color:var(--text)">'+rateBefore+'%</span>':'')
+        +(rateAfter!==null?' \u00B7 After: <span style="font-family:var(--mono);color:'+(rateDelta>0?'var(--green)':rateDelta<0?'var(--red)':'var(--text)')+'">'+rateAfter+'%</span>':'')
+        +(rateDelta!==null?' <span style="color:'+(rateDelta>0?'var(--green)':rateDelta<0?'var(--red)':'var(--muted)')+'">'+(rateDelta>0?'\u2191+':'\u2193')+rateDelta+'%</span>':'')
+      +'</div>':'')
+    +'</div>';
+  }).join('');
+}
+
 function renderBestPredList(){
   var el=document.getElementById('best-pred-list');
   if(!el||!activeShop) return;
@@ -4634,44 +4928,121 @@ function renderBestPredList(){
   }
 
   // Render immediately
-  el.innerHTML=candidates.map(function(p){return rowHTML(p,null);}).join('');
+  el.innerHTML=candidates.map(function(p){return rowHTML(p,p.btCache||null);}).join('');
 
-  // Phase 2: backtest each row lazily with delay between each
+  // Phase 2: backtest each row lazily — skip if already cached
+  // Cache current model once for all anchor comparisons
+  var currentCacheKey='current-'+activeShop;
+  var currentBTCache=db.shops[activeShop].currentBTCache||{};
+
   candidates.forEach(function(p, idx){
+    if(p.btCache){return;} // already computed — skip
     setTimeout(function(){
+      db=loadDB();
       var fromDate=p.actualDate||p.createdDate;
+
+      // Use cached current model result if same fromDate
+      var cachedCur=currentBTCache[fromDate];
+      if(!cachedCur){
+        var btCurResult=backtestWeights(activeShop,currentW,fromDate);
+        cachedCur={rate:btCurResult?btCurResult.hitRate:null,n:btCurResult?btCurResult.detail.length:0};
+        currentBTCache[fromDate]=cachedCur;
+        db.shops[activeShop].currentBTCache=currentBTCache;
+      }
+
       var bt=backtestWeights(activeShop,p.weightsAtTime,fromDate);
-      var btCur=bt?backtestWeights(activeShop,currentW,fromDate):null;
       var btInfo=bt?{
         rate:bt.hitRate,
         n:bt.detail.length,
-        diff:btCur?bt.hitRate-btCur.hitRate:null
+        diff:cachedCur.rate!==null?bt.hitRate-cachedCur.rate:null
       }:null;
+
+      // Cache on prediction object so next open is instant
+      if(btInfo){
+        db=loadDB();
+        var pred2=db.shops[activeShop].predictions.find(function(q){return q.id===p.id;});
+        if(pred2){pred2.btCache=btInfo; saveDB(db);}
+      }
+
       var row=document.getElementById('bprow-'+p.id);
       if(row) row.outerHTML=rowHTML(p,btInfo);
-    }, idx*300); // 300ms apart — responsive, not blocking
+    }, idx*400); // 400ms apart — gives buildWeightedScoreDirect time to finish
   });
 }
 
 function backtestWeights(letter, weights, fromDate){
-  // Score each refill from fromDate onward using given weights
-  // Returns {hits, total, hitRate, detail}
+  // Two-dimensional weighting: recency (0.92 decay) × regime (stable=1.0, shift=0.6)
   db=loadDB();
   var entries=shopEntries(letter).slice().sort(function(a,b){return a.date.localeCompare(b.date);});
+  var preds=shopPreds(letter);
   var fromIdx=entries.findIndex(function(e){return e.date>fromDate;});
-  if(fromIdx<3) return null; // need training data before fromDate
-  var hits=0,total=0,detail=[];
+  if(fromIdx<3) return null;
+  var hits=0,total=0,weightedHits=0,weightedTotal=0,detail=[];
   for(var i=fromIdx;i<entries.length-1;i++){
     var trainEntries=entries.slice(0,i);
     var actual=entries[i].codes;
-    // Score directly using provided weights — bypass getWeights/loadDB
     var scores=buildWeightedScoreDirect(trainEntries, weights);
     var top5=Object.entries(scores).sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];});
     var h=top5.filter(function(c){return actual.indexOf(c)>-1;}).length;
+    // Recency weight
+    var stepsFromEnd=entries.length-2-i;
+    var recencyW=Math.pow(0.92, stepsFromEnd);
+    // Regime weight: find prediction made at this entry
+    var entryDate=entries[i].date;
+    var prevDate=i>0?entries[i-1].date:'';
+    var predAtDate=preds.filter(function(p){
+      var d=p.actualDate||p.createdDate;
+      return d===entryDate||d===prevDate;
+    })[0];
+    var regimeW=predAtDate&&predAtDate.regimeAtTime
+      ?(predAtDate.regimeAtTime.shifting?0.6:1.0)
+      :0.8;
+    var rw=recencyW*regimeW;
     hits+=h; total+=top5.length;
-    detail.push({date:entries[i].date,hits:h,total:top5.length});
+    weightedHits+=h*rw; weightedTotal+=top5.length*rw;
+    detail.push({date:entryDate,hits:h,total:top5.length,rw:Math.round(rw*100)/100,
+      regime:regimeW===1.0?'stable':regimeW===0.6?'shift':'unknown'});
   }
-  return {hits:hits,total:total,hitRate:total?Math.round(hits/total*100):0,detail:detail};
+  var hitRate=total?Math.round(hits/total*100):0;
+  var weightedRate=weightedTotal>0?Math.round(weightedHits/weightedTotal*100):hitRate;
+  return {hits:hits,total:total,hitRate:weightedRate,rawHitRate:hitRate,detail:detail};
+}
+
+function buildSequentialCooccur(entries){
+  // For each code in refill N, score how often it appears in refill N+1
+  // Returns score per code representing "how likely to follow last refill's codes"
+  if(!entries||entries.length<4) return {};
+  var lastEntry=entries[entries.length-1];
+  var lastCodes=lastEntry?lastEntry.codes||[]:[];
+  if(!lastCodes.length) return {};
+
+  // Build transition counts: after seeing code A, how often does code B follow?
+  var transitions={}; // transitions[A][B] = count
+  for(var i=0;i<entries.length-1;i++){
+    var fromCodes=entries[i].codes||[];
+    var toCodes=entries[i+1].codes||[];
+    fromCodes.forEach(function(a){
+      if(!transitions[a]) transitions[a]={};
+      toCodes.forEach(function(b){
+        transitions[a][b]=(transitions[a][b]||0)+1;
+      });
+    });
+  }
+
+  // Score each code: sum of transition probabilities from last refill's codes
+  var scores={};
+  var allCodes=Array.from(new Set(entries.reduce(function(a,e){return a.concat(e.codes);},[]) ));
+  allCodes.forEach(function(b){
+    var score=0;
+    lastCodes.forEach(function(a){
+      if(transitions[a]&&transitions[a][b]){
+        var total=Object.values(transitions[a]).reduce(function(s,v){return s+v;},0);
+        score+=total>0?transitions[a][b]/total:0;
+      }
+    });
+    if(score>0) scores[b]=score/lastCodes.length;
+  });
+  return scores;
 }
 
 function buildWeightedScoreDirect(entries, weights){
@@ -4682,11 +5053,12 @@ function buildWeightedScoreDirect(entries, weights){
   var recency=buildWeightedScore(entries);
   var streaks=buildStreaks(entries);
   var cooccur=buildCooccurrence(entries);
+  var seqcooccur=buildSequentialCooccur(entries);
   var cycle=buildCycleScore(entries);
   var momentum=(buildMomentumScore(entries).scores)||{};
   var overdue=buildOverdueScore(entries);
   var interval=buildIntervalRegularity(entries);
-  var dow=buildDayOfWeekScore(entries);
+  var dow=buildDowPattern(entries);
   var qty=buildQtyDominance(entries);
   var qtyStreak=buildQtyStreak(entries);
   var allCodes=Array.from(new Set(entries.reduce(function(a,e){return a.concat(e.codes);},[]) ));
@@ -4697,6 +5069,7 @@ function buildWeightedScoreDirect(entries, weights){
       (recency[c]||0)*w.recency+
       (streaks[c]||0)*w.streak+
       (cooccur[c]||0)*w.cooccur+
+      (seqcooccur[c]||0)*w.seqcooccur+
       (cycle[c]||0)*w.cycle+
       (momentum[c]||0)*w.momentum+
       (overdue[c]||0)*w.overdue+
@@ -4723,7 +5096,13 @@ function useBestPredModel(predId){
   var diff=anchorTest&&currentTest?anchorTest.hitRate-currentTest.hitRate:null;
   var btN=anchorTest?anchorTest.detail.length:0;
 
+  // Cache result on prediction object so next open is instant
+  db=loadDB();
+  var predToCache=db.shops[activeShop].predictions.find(function(q){return String(q.id)===String(predId);});
+  if(predToCache&&anchorTest){predToCache.btCache={rate:anchorTest.hitRate,n:btN,diff:diff};saveDB(db);}
+
   snapshotCurrentWeights(activeShop);
+  db=loadDB();
   db.shops[activeShop].weights=Object.assign({},pred.weightsAtTime);
   db.shops[activeShop].pinnedPredId=String(predId);
 
@@ -4921,6 +5300,7 @@ var livePendingToKeep=existing.length>0&&existing[0].createdDate>=lastEntryDate?
 db.shops[letter].predictions=(s.predictions||[]).filter(function(p){return !p.auto||p.liveResolved;});
 db.shops[letter].obsWindow={};
 db.shops[letter].gradAccum={};
+db.shops[letter].currentBTCache={}; // clear cached backtest results on rebuild
 saveDB(db);
 var i=2;
 var resolvedCount=0;
@@ -4954,15 +5334,21 @@ if(Object.keys(cs).length)compactSnaps[c]=cs;
 });
 var predId=Date.now();
 saveSnapshot(predId,compactSnaps);
+var regimeNow=detectRegimeShift(allEntries);
+var top5CodesRebuild=finalTop5.map(function(x){return x[0];});
+var frozenSummaryRebuild=buildPlainEnglishSummary(allEntries,db.shops[letter].predictions||[],top5CodesRebuild,finalResult,letter)||'';
+var frozenConfRebuild=buildRefillConfidenceScore(allEntries,db.shops[letter].predictions||[],top5CodesRebuild,finalResult,letter)||null;
 db.shops[letter].predictions.push({
 id:predId,createdDate:allEntries[allEntries.length-1].date,
 modelVersion:SIGNAL_VERSION,
-predictedCodes:finalTop5.map(function(x){return x[0];}),
+predictedCodes:top5CodesRebuild,
 promotedCodes:[],patternRules:[],watchoutCodes:[],
-regimeAtTime:null,
+regimeAtTime:{shifting:regimeNow.shifting,overlapScore:regimeNow.overlapScore,note:regimeNow.note||''},
 scores:finalTop5.reduce(function(o,x){o[x[0]]=Math.round(x[1]/fMax*100);return o;},{}),
 frozenScores:fNorm,
 frozenSnapshots:compactSnaps,
+frozenSummary:frozenSummaryRebuild,
+frozenConf:frozenConfRebuild,
 weightsAtTime:Object.assign({},finalResult.weights),
 status:'pending',outcome:null,actualDate:null,actualCodes:null,auto:true,
     modelVerId:(db.shops[letter]&&db.shops[letter].currentModelVerId)||null
@@ -5008,12 +5394,18 @@ var normScores={};
 Object.keys(result.scores).forEach(function(c){normScores[c]=Math.round(result.scores[c]/fullMax*100);});
 var predId2=Date.now();
 saveSnapshot(predId2,compactSnaps2);
+var regimeNow2=detectRegimeShift(trainEntries);
+// Surprise codes: appeared but not predicted — store for Learner analysis
+var surpriseCodes2=nextEntry.codes.filter(function(c){
+  return top5.every(function(x){return x[0]!==c;});
+});
 var pred={
 id:predId2,createdDate:trainEntries[trainEntries.length-1].date,
 modelVersion:SIGNAL_VERSION,
 predictedCodes:top5.map(function(x){return x[0];}),
 promotedCodes:[],patternRules:[],watchoutCodes:[],
-triggeredOutcome:{},regimeAtTime:null,
+surpriseCodes:surpriseCodes2,
+triggeredOutcome:{},regimeAtTime:{shifting:regimeNow2.shifting,overlapScore:regimeNow2.overlapScore,note:regimeNow2.note||''},
 scores:top5.reduce(function(o,x){o[x[0]]=Math.round(x[1]/top5Max*100);return o;},{}),
 frozenScores:normScores,
 frozenSnapshots:compactSnaps2,
@@ -5107,6 +5499,10 @@ function predCardHTML(pred, canResolve, trainEntries, trainPreds){
     var decompAllSnap=decompressSnap(allPredSnap,isCompactSnap);
     var rawSnap=decompAllSnap[c]||{};
     var grade=te.length>=3?buildCodeConfidenceGrade(c,rawSnap,wts,te,tp,activeShop,scorePct):{grade:'\u2014',col:'var(--muted)'};
+    // Combined % using only predictions resolved before this one (tp)
+    var hrHist=buildCodeHitRate(c,tp);
+    var combinedPct=hrHist?Math.round(scorePct*0.5+hrHist.rate*0.5):scorePct;
+    var combinedCol=combinedPct>=60?'var(--green)':combinedPct>=35?'var(--gold)':'var(--red)';
     var codeColor=type==='top5'?(isHit?'var(--green)':isMiss?'var(--red)':'var(--text)'):typeCol[type];
     return '<div style="display:flex;align-items:center;gap:5px;padding:3px 0">'
       +(typeIcon[type]?'<span style="font-size:10px;min-width:16px">'+typeIcon[type]+'</span>':'<span style="min-width:16px"></span>')
@@ -5114,9 +5510,9 @@ function predCardHTML(pred, canResolve, trainEntries, trainPreds){
       +(outcome?'<span style="font-size:11px;font-weight:700;color:'+outcomeCol+'">'+icon+'</span>':'<span style="min-width:12px"></span>')
       +'<span style="font-size:10px;font-weight:900;font-family:var(--mono);color:'+grade.col+'">['+grade.grade+']</span>'
       +'<div style="flex:1;height:4px;background:var(--surface3);border-radius:2px;overflow:hidden">'
-        +'<div style="width:'+scorePct+'%;height:100%;background:'+(isHit?'var(--green)':isMiss?'var(--red)':'var(--accent)')+';border-radius:2px"></div>'
+        +'<div style="width:'+combinedPct+'%;height:100%;background:'+(isHit?'var(--green)':isMiss?'var(--red)':combinedCol)+';border-radius:2px"></div>'
       +'</div>'
-      +'<span style="font-size:10px;font-family:var(--mono);color:var(--muted);min-width:28px;text-align:right">'+scorePct+'%</span>'
+      +'<span style="font-size:10px;font-family:var(--mono);color:'+(isHit?'var(--green)':isMiss?'var(--red)':combinedCol)+';font-weight:700;min-width:28px;text-align:right">'+combinedPct+'%</span>'
       +'</div>';
   }
 
