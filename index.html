@@ -3204,7 +3204,8 @@ var resolveResult=autoResolve(letter,date,codes);
 shopData(letter).entries.push({id:Date.now(),date:date,codes:codes,source:source});
 shopData(letter).entries.sort(function(a,b){return a.date.localeCompare(b.date);});
 saveDB(db);
-autoSavePrediction(letter);
+// NO autoSavePrediction here — PREDICT stays frozen until Rebuild
+// Learner runs in background to analyse the new resolved prediction
 renderShopPills();
 updateAllBanners();
 return resolveResult;
