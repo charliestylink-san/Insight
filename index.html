@@ -3312,6 +3312,26 @@ setTimeout(function(){learnAndStoreThresholds(letter);},100);
 return {hadPrediction:hadPrediction,resolved:resolvedPreds,worstStatus:resolvedPreds.length?resolvedPreds[0].status:null};
 }
 
+// Sort codes by grade (A→N) then combined% — called at freeze time so display order is fixed
+function sortCodesByGrade(codes, frozenScores, snapByCode, weights, entries, preds, letter){
+  var gradeOrder={A:0,B:1,C:2,D:3,N:4};
+  var fullMax=Math.max.apply(null,Object.values(frozenScores).concat([1]));
+  return codes.slice().sort(function(a,b){
+    var aPct=Math.round((frozenScores[a]||0)/fullMax*100);
+    var bPct=Math.round((frozenScores[b]||0)/fullMax*100);
+    var aGrade=buildCodeConfidenceGrade(a,snapByCode[a]||{},weights,entries,preds,letter,aPct);
+    var bGrade=buildCodeConfidenceGrade(b,snapByCode[b]||{},weights,entries,preds,letter,bPct);
+    var aOrder=gradeOrder[aGrade.grade]!==undefined?gradeOrder[aGrade.grade]:5;
+    var bOrder=gradeOrder[bGrade.grade]!==undefined?gradeOrder[bGrade.grade]:5;
+    if(aOrder!==bOrder) return aOrder-bOrder;
+    var aHR=buildCodeHitRate(a,preds);
+    var bHR=buildCodeHitRate(b,preds);
+    var aCombined=aHR?Math.round(aPct*0.5+aHR.rate*0.5):aPct;
+    var bCombined=bHR?Math.round(bPct*0.5+bHR.rate*0.5):bPct;
+    return bCombined-aCombined;
+  });
+}
+
 function autoSavePrediction(letter){
 db=loadDB();
 // Clear stale per-code lifts if signal version changed
@@ -3359,12 +3379,13 @@ db.shops[letter].predictions=resolvedPreds;
 db.shops[letter].lastFullScores=frozenScores;
 // Top-5 display scores (normalised 0-100)
 var top5Scores=top5.reduce(function(o,x){o[x[0]]=Math.round(x[1]/top5Max*100);return o;},{});
-// Freeze plain english summary and confidence at prediction time
-var top5CodesFreeze=top5.map(function(x){return x[0];});
+// Sort codes by grade at freeze time — display order fixed permanently
+var snapByCodeFreeze={}; Object.keys(compactSnaps).forEach(function(c){var s=compactSnaps[c];var d={};Object.keys(s).forEach(function(k){d[k]=s[k]/100;});snapByCodeFreeze[c]=d;});
+var top5CodesFreeze=sortCodesByGrade(top5.map(function(x){return x[0];}),frozenScores,snapByCodeFreeze,result.weights,entries,preds,letter);
 var frozenSummary=buildPlainEnglishSummary(entries,preds,top5CodesFreeze,result,letter)||'';
 var frozenConf=buildRefillConfidenceScore(entries,preds,top5CodesFreeze,result,letter)||null;
 var predId=Date.now();
-// Always save snapshot to external store \u2014 learner can analyze anytime
+// Always save snapshot to external store — learner can analyze anytime
 saveSnapshot(predId,compactSnaps);
 // Also embed inline for the 10 most recent (fast path for learner)
 var predsWithSnaps=resolvedPreds.filter(function(p){return p.frozenSnapshots;}).length;
@@ -3374,7 +3395,7 @@ db.shops[letter].predictions.push({
   createdDate:lastEntryDate,
   targetDate:null,
   modelVersion:SIGNAL_VERSION,
-  predictedCodes:top5.map(function(x){return x[0];}),
+  predictedCodes:top5CodesFreeze,
   promotedCodes:(result.promotions||[]).map(function(p){return p.promoted;}),
   patternRules:(result.promotions||[]).map(function(p){
     return p.pattern&&p.pattern.rule?p.pattern.rule.slice(0,40):'pattern';
@@ -3383,7 +3404,7 @@ db.shops[letter].predictions.push({
   regimeAtTime:result.regime?{shifting:result.regime.shifting,note:result.regime.note||''}:null,
   scores:top5Scores,
   frozenScores:frozenScores,
-  frozenSnapshots:embedInline?compactSnaps:null, // inline for recent, external store for all
+  frozenSnapshots:embedInline?compactSnaps:null,
   weightsAtTime:Object.assign({},result.weights),
   frozenSummary:frozenSummary,
   frozenConf:frozenConf,
@@ -4362,23 +4383,7 @@ function renderPredictionCodes(result,entries,preds,frozenPred){
   var isCompact=!!(frozenPred.frozenSnapshots&&frozenPred.modelVersion);
   var rawSnap=getSnapshotForPred(frozenPred);
   var snapByCode=decompressSnap(rawSnap,isCompact);
-
-  // Sort top5 by grade (A→B→C→D→N) then combinedPct within same grade
-  var gradeOrder={A:0,B:1,C:2,D:3,N:4};
-  top5Codes=top5Codes.slice().sort(function(a,b){
-    var aPct=Math.round((frozen[a]||0)/fullMax*100);
-    var bPct=Math.round((frozen[b]||0)/fullMax*100);
-    var aGrade=buildCodeConfidenceGrade(a,snapByCode[a]||{},weights,entries,preds,activeShop,aPct);
-    var bGrade=buildCodeConfidenceGrade(b,snapByCode[b]||{},weights,entries,preds,activeShop,bPct);
-    var aOrder=gradeOrder[aGrade.grade]!==undefined?gradeOrder[aGrade.grade]:5;
-    var bOrder=gradeOrder[bGrade.grade]!==undefined?gradeOrder[bGrade.grade]:5;
-    if(aOrder!==bOrder) return aOrder-bOrder;
-    var aHR=buildCodeHitRate(a,preds);
-    var bHR=buildCodeHitRate(b,preds);
-    var aCombined=aHR?Math.round(aPct*0.5+aHR.rate*0.5):aPct;
-    var bCombined=bHR?Math.round(bPct*0.5+bHR.rate*0.5):bPct;
-    return bCombined-aCombined;
-  });
+  // Order is fixed at freeze time — read stored order, no re-sort
 
   function frozenRow(c,type){
     var scorePct=Math.round((frozen[c]||0)/fullMax*100);
@@ -4557,11 +4562,17 @@ function renderTrackScore(){
     +(ms.hitRate!==null?'<span style="font-size:12px;color:var(--muted)">'+ms.hitRate+'% hit &#xB7; '+ms.slotCov+'% slot</span>':'')
     +'</div>';
 
-  // Show frozen confidence number + grade from pending prediction (same as PREDICT)
-  var pendingForConf=preds.filter(function(p){return p.status==='pending';});
-  var frozenConfPred=pendingForConf.length?pendingForConf[pendingForConf.length-1]:null;
-  if(frozenConfPred&&frozenConfPred.frozenConf){
-    var fc=frozenConfPred.frozenConf;
+  // Show frozen confidence + grades from the most recently matched prediction
+  // This is the same prediction shown in the most recent card below
+  var pending=preds.filter(function(p){return p.status==='pending';});
+  var lastMatched=preds.filter(function(p){return p.status!=='pending'&&p.outcome;});
+  lastMatched=lastMatched.length?[lastMatched[lastMatched.length-1]]:[];
+  // Use pending if it exists (after rebuild, before next refill)
+  // Use last matched if no pending (after refill saved, before rebuild)
+  var frozenPred=pending.length?pending[pending.length-1]:
+                 lastMatched.length?lastMatched[0]:null;
+  if(frozenPred&&frozenPred.frozenConf){
+    var fc=frozenPred.frozenConf;
     var confNum=fc.score||fc.confidence||0;
     var confGrade=fc.grade||'';
     var confGradeCol=confGrade==='A'?'var(--green)':confGrade==='B'?'var(--green)':
@@ -4581,8 +4592,6 @@ function renderTrackScore(){
   }
 
   // Per-code grade table — read from frozen pending prediction (same source as PREDICT)
-  var pending=preds.filter(function(p){return p.status==='pending';});
-  var frozenPred=pending.length?pending[pending.length-1]:null;
   if(frozenPred){
     var predScores=frozenPred.frozenScores&&Object.keys(frozenPred.frozenScores).length
       ?frozenPred.frozenScores
@@ -4594,22 +4603,7 @@ function renderTrackScore(){
     var top5Codes=frozenPred.predictedCodes||
       Object.entries(predScores).sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];});
     var fullMax=Math.max.apply(null,Object.values(predScores).concat([0.001]));
-    // Sort by grade then combinedPct — matches PREDICT display order
-    var gradeOrder={A:0,B:1,C:2,D:3,N:4};
-    top5Codes=top5Codes.slice().sort(function(a,b){
-      var aPct=Math.round((predScores[a]||0)/fullMax*100);
-      var bPct=Math.round((predScores[b]||0)/fullMax*100);
-      var aGrade=buildCodeConfidenceGrade(a,snapByCode[a]||{},weights,entries,preds,activeShop,aPct);
-      var bGrade=buildCodeConfidenceGrade(b,snapByCode[b]||{},weights,entries,preds,activeShop,bPct);
-      var aOrder=gradeOrder[aGrade.grade]!==undefined?gradeOrder[aGrade.grade]:5;
-      var bOrder=gradeOrder[bGrade.grade]!==undefined?gradeOrder[bGrade.grade]:5;
-      if(aOrder!==bOrder) return aOrder-bOrder;
-      var aHR=buildCodeHitRate(a,preds);
-      var bHR=buildCodeHitRate(b,preds);
-      var aCombined=aHR?Math.round(aPct*0.5+aHR.rate*0.5):aPct;
-      var bCombined=bHR?Math.round(bPct*0.5+bHR.rate*0.5):bPct;
-      return bCombined-aCombined;
-    });
+    // Order fixed at freeze time — no re-sort
     html+='<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Frozen prediction grades</div>';
     html+=top5Codes.map(function(c){
       var pct=Math.round((predScores[c]||0)/fullMax*100);
@@ -5336,9 +5330,12 @@ if(Object.keys(cs).length)compactSnaps[c]=cs;
 var predId=Date.now();
 saveSnapshot(predId,compactSnaps);
 var regimeNow=detectRegimeShift(allEntries);
-var top5CodesRebuild=finalTop5.map(function(x){return x[0];});
-var frozenSummaryRebuild=buildPlainEnglishSummary(allEntries,db.shops[letter].predictions||[],top5CodesRebuild,finalResult,letter)||'';
-var frozenConfRebuild=buildRefillConfidenceScore(allEntries,db.shops[letter].predictions||[],top5CodesRebuild,finalResult,letter)||null;
+var allPredsSoFar=db.shops[letter].predictions||[];
+// Sort codes by grade at freeze time
+var snapByCodeRebuild={};Object.keys(compactSnaps).forEach(function(c){var s=compactSnaps[c];var d={};Object.keys(s).forEach(function(k){d[k]=s[k]/100;});snapByCodeRebuild[c]=d;});
+var top5CodesRebuild=sortCodesByGrade(finalTop5.map(function(x){return x[0];}),fNorm,snapByCodeRebuild,finalResult.weights,allEntries,allPredsSoFar,letter);
+var frozenSummaryRebuild=buildPlainEnglishSummary(allEntries,allPredsSoFar,top5CodesRebuild,finalResult,letter)||'';
+var frozenConfRebuild=buildRefillConfidenceScore(allEntries,allPredsSoFar,top5CodesRebuild,finalResult,letter)||null;
 db.shops[letter].predictions.push({
 id:predId,createdDate:allEntries[allEntries.length-1].date,
 modelVersion:SIGNAL_VERSION,
@@ -5400,10 +5397,13 @@ var regimeNow2=detectRegimeShift(trainEntries);
 var surpriseCodes2=nextEntry.codes.filter(function(c){
   return top5.every(function(x){return x[0]!==c;});
 });
+// Sort codes by grade at freeze time
+var snapByCode2={};Object.keys(compactSnaps2).forEach(function(c){var s=compactSnaps2[c];var d={};Object.keys(s).forEach(function(k){d[k]=s[k]/100;});snapByCode2[c]=d;});
+var sortedTop5Codes=sortCodesByGrade(top5.map(function(x){return x[0];}),normScores,snapByCode2,result.weights,trainEntries,shopPreds(letter),letter);
 var pred={
 id:predId2,createdDate:trainEntries[trainEntries.length-1].date,
 modelVersion:SIGNAL_VERSION,
-predictedCodes:top5.map(function(x){return x[0];}),
+predictedCodes:sortedTop5Codes,
 promotedCodes:[],patternRules:[],watchoutCodes:[],
 surpriseCodes:surpriseCodes2,
 triggeredOutcome:{},regimeAtTime:{shifting:regimeNow2.shifting,overlapScore:regimeNow2.overlapScore,note:regimeNow2.note||''},
