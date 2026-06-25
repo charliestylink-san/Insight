@@ -4383,7 +4383,8 @@ function renderPredictionCodes(result,entries,preds,frozenPred){
   var isCompact=!!(frozenPred.frozenSnapshots&&frozenPred.modelVersion);
   var rawSnap=getSnapshotForPred(frozenPred);
   var snapByCode=decompressSnap(rawSnap,isCompact);
-  // Order is fixed at freeze time — read stored order, no re-sort
+  // Apply grade sort at display time — ensures consistent order for both old and new predictions
+  top5Codes=sortCodesByGrade(top5Codes,frozen,snapByCode,weights,entries,preds,activeShop);
 
   function frozenRow(c,type){
     var scorePct=Math.round((frozen[c]||0)/fullMax*100);
@@ -4603,7 +4604,8 @@ function renderTrackScore(){
     var top5Codes=frozenPred.predictedCodes||
       Object.entries(predScores).sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];});
     var fullMax=Math.max.apply(null,Object.values(predScores).concat([0.001]));
-    // Order fixed at freeze time — no re-sort
+    // Apply grade sort at display time to ensure consistent order with PREDICT
+    top5Codes=sortCodesByGrade(top5Codes,predScores,snapByCode,weights,entries,preds,activeShop);
     html+='<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Frozen prediction grades</div>';
     html+=top5Codes.map(function(c){
       var pct=Math.round((predScores[c]||0)/fullMax*100);
