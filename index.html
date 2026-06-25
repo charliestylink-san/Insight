@@ -4345,8 +4345,10 @@ function renderConfidenceScore(entries,preds,result){
 }
 
 function buildCodeHitRate(code, preds){
+  // Only count liveResolved predictions — actual refills matched against real predictions
+  // Never count auto-rebuilt predictions — those are synthetic and inflate hit rates
   var resolved=preds.filter(function(p){
-    return p.status!=='pending'&&p.outcome&&p.predictedCodes&&
+    return p.liveResolved&&p.outcome&&p.predictedCodes&&
            p.predictedCodes.indexOf(code)>-1;
   });
   if(resolved.length<3) return null;
@@ -4388,16 +4390,15 @@ function renderPredictionCodes(result,entries,preds,frozenPred){
   var isCompact=!!(frozenPred.frozenSnapshots&&frozenPred.modelVersion);
   var rawSnap=getSnapshotForPred(frozenPred);
   var snapByCode=decompressSnap(rawSnap,isCompact);
-  // Use frozenCodeData if available, else compute once for display
+  // Use frozenCodeData if available — frozen order and values, no recalculation
   var codeData=frozenPred.frozenCodeData||null;
   if(!codeData){
+    // Old prediction without frozenCodeData — compute once for display only
     var sorted2=sortCodesByGrade(top5Codes,frozen,snapByCode,weights,entries,preds,activeShop);
     top5Codes=sorted2;
     codeData=sorted2._codeData||{};
-  } else {
-    top5Codes=sortCodesByGrade(top5Codes,frozen,snapByCode,weights,entries,preds,activeShop);
-    codeData=top5Codes._codeData||codeData;
   }
+  // top5Codes order is already frozen — do not re-sort
 
   function frozenRow(c,type){
     var d=codeData[c]||{};
@@ -4603,8 +4604,6 @@ function renderTrackScore(){
     var top5Codes=frozenPred.predictedCodes||
       Object.entries(predScores).sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];});
     var fullMax=Math.max.apply(null,Object.values(predScores).concat([0.001]));
-    // Apply grade sort at display time to ensure consistent order with PREDICT
-    top5Codes=sortCodesByGrade(top5Codes,predScores,snapByCode,weights,entries,preds,activeShop);
     var trackCodeData=frozenPred.frozenCodeData||null;
     if(!trackCodeData){
       // Old prediction without frozenCodeData — compute once for display
@@ -4612,6 +4611,7 @@ function renderTrackScore(){
       top5Codes=tcSorted;
       trackCodeData=tcSorted._codeData||{};
     }
+    // top5Codes order is frozen — do not re-sort
     html+='<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Frozen prediction grades</div>';
     html+=top5Codes.map(function(c){
       var d=trackCodeData[c]||{};
@@ -4659,7 +4659,7 @@ function renderTrackScore(){
 function renderTrackHistory(){
   var entries2=shopEntries(activeShop);
   var predsAll=shopPreds(activeShop);
-  var resolved=predsAll.filter(function(p){return p.status!=='pending'&&p.outcome;});
+  var resolved=predsAll.filter(function(p){return p.liveResolved&&p.outcome;});
   resolved=resolved.slice().sort(function(a,b){
     return (a.actualDate||a.createdDate).localeCompare(b.actualDate||b.createdDate);
   });
