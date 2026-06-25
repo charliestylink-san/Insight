@@ -3313,23 +3313,36 @@ return {hadPrediction:hadPrediction,resolved:resolvedPreds,worstStatus:resolvedP
 }
 
 // Sort codes by grade (A→N) then combined% — called at freeze time so display order is fixed
+// Also computes and returns frozenGrades, frozenHitRates, frozenSignals for each code
 function sortCodesByGrade(codes, frozenScores, snapByCode, weights, entries, preds, letter){
   var gradeOrder={A:0,B:1,C:2,D:3,N:4};
   var fullMax=Math.max.apply(null,Object.values(frozenScores).concat([1]));
-  return codes.slice().sort(function(a,b){
-    var aPct=Math.round((frozenScores[a]||0)/fullMax*100);
-    var bPct=Math.round((frozenScores[b]||0)/fullMax*100);
-    var aGrade=buildCodeConfidenceGrade(a,snapByCode[a]||{},weights,entries,preds,letter,aPct);
-    var bGrade=buildCodeConfidenceGrade(b,snapByCode[b]||{},weights,entries,preds,letter,bPct);
-    var aOrder=gradeOrder[aGrade.grade]!==undefined?gradeOrder[aGrade.grade]:5;
-    var bOrder=gradeOrder[bGrade.grade]!==undefined?gradeOrder[bGrade.grade]:5;
-    if(aOrder!==bOrder) return aOrder-bOrder;
-    var aHR=buildCodeHitRate(a,preds);
-    var bHR=buildCodeHitRate(b,preds);
-    var aCombined=aHR?Math.round(aPct*0.5+aHR.rate*0.5):aPct;
-    var bCombined=bHR?Math.round(bPct*0.5+bHR.rate*0.5):bPct;
-    return bCombined-aCombined;
+  // Pre-compute grades and hit rates for all codes
+  var codeData={};
+  codes.forEach(function(c){
+    var pct=Math.round((frozenScores[c]||0)/fullMax*100);
+    var snap=snapByCode[c]||{};
+    var grade=buildCodeConfidenceGrade(c,snap,weights,entries,preds,letter,pct);
+    var hr=buildCodeHitRate(c,preds);
+    var combined=hr?Math.round(pct*0.5+hr.rate*0.5):pct;
+    var consensus=buildSignalConsensus(c,snap,weights,weights);
+    var topDriving=consensus.yesSignals.slice(0,2).map(function(k){return SIGNAL_NAMES&&SIGNAL_NAMES[k]||k;}).join(' \u00B7 ');
+    codeData[c]={
+      pct:pct, combined:combined,
+      grade:grade.grade, gradeCol:grade.col, adapted:!!grade.adapted,
+      hrRate:hr?hr.rate:null, hrN:hr?hr.predicted:null,
+      topDriving:topDriving,
+      topSignalKey:consensus.yesSignals[0]||null
+    };
   });
+  var sorted=codes.slice().sort(function(a,b){
+    var aOrder=gradeOrder[codeData[a].grade]!==undefined?gradeOrder[codeData[a].grade]:5;
+    var bOrder=gradeOrder[codeData[b].grade]!==undefined?gradeOrder[codeData[b].grade]:5;
+    if(aOrder!==bOrder) return aOrder-bOrder;
+    return codeData[b].combined-codeData[a].combined;
+  });
+  sorted._codeData=codeData; // attach for caller to harvest
+  return sorted;
 }
 
 function autoSavePrediction(letter){
@@ -3382,6 +3395,7 @@ var top5Scores=top5.reduce(function(o,x){o[x[0]]=Math.round(x[1]/top5Max*100);re
 // Sort codes by grade at freeze time — display order fixed permanently
 var snapByCodeFreeze={}; Object.keys(compactSnaps).forEach(function(c){var s=compactSnaps[c];var d={};Object.keys(s).forEach(function(k){d[k]=s[k]/100;});snapByCodeFreeze[c]=d;});
 var top5CodesFreeze=sortCodesByGrade(top5.map(function(x){return x[0];}),frozenScores,snapByCodeFreeze,result.weights,entries,preds,letter);
+var frozenCodeData=top5CodesFreeze._codeData||{};
 var frozenSummary=buildPlainEnglishSummary(entries,preds,top5CodesFreeze,result,letter)||'';
 var frozenConf=buildRefillConfidenceScore(entries,preds,top5CodesFreeze,result,letter)||null;
 var predId=Date.now();
@@ -3405,6 +3419,7 @@ db.shops[letter].predictions.push({
   scores:top5Scores,
   frozenScores:frozenScores,
   frozenSnapshots:embedInline?compactSnaps:null,
+  frozenCodeData:frozenCodeData,
   weightsAtTime:Object.assign({},result.weights),
   frozenSummary:frozenSummary,
   frozenConf:frozenConf,
@@ -4307,13 +4322,9 @@ function renderSignalPerf(weights,preds,snaps,scores){
 function renderConfidenceScore(entries,preds,result){
   var el=document.getElementById('refill-confidence');
   if(!el) return;
-  // Use frozen confidence if available, otherwise compute from result
+  // Frozen only — never recalculate
   var rcs=result.frozenConf||null;
-  if(!rcs){
-    var allScores=result.scores||result.frozenScores||{};
-    var top5Codes=Object.entries(allScores).sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];});
-    rcs=buildRefillConfidenceScore(entries,preds,top5Codes,result,activeShop);
-  }
+  if(!rcs) return; // no frozen conf — show nothing until rebuild
   var adapted=rcs.adapted;
   el.innerHTML='<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border);margin-bottom:8px">'
     +'<span style="font-size:28px;font-weight:900;font-family:var(--mono);color:'+rcs.col+'">'+rcs.score+'</span>'
@@ -4325,16 +4336,10 @@ function renderConfidenceScore(entries,preds,result){
     +'</div>'
     +(rcs.regimeShifting?'<span class="conf-badge conf-low" style="margin-left:auto">&#x26A1; regime shift</span>':'')
     +'</div>';
-
-  // Plain English
+  // Plain English — frozen only
   var pe=document.getElementById('plain-english');
   if(pe){
-    // Use frozen summary if available
     var peText=result.frozenSummary||null;
-    if(!peText){
-      var top5CodesForSummary=Object.entries(result.scores).sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];});
-      peText=buildPlainEnglishSummary(entries,preds,top5CodesForSummary,result,activeShop);
-    }
     pe.innerHTML=peText?'<div style="font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:6px">'+peText+'</div>':'';
   }
 }
@@ -4379,61 +4384,53 @@ function renderPredictionCodes(result,entries,preds,frozenPred){
     if(seen2.indexOf(c)>-1) return false; seen2.push(c); return true;
   });
 
-  // Decompress frozen snapshots — these are the signal values at freeze time
+  // Decompress frozen snapshots — signal values at freeze time
   var isCompact=!!(frozenPred.frozenSnapshots&&frozenPred.modelVersion);
   var rawSnap=getSnapshotForPred(frozenPred);
   var snapByCode=decompressSnap(rawSnap,isCompact);
-  // Apply grade sort at display time — ensures consistent order for both old and new predictions
-  top5Codes=sortCodesByGrade(top5Codes,frozen,snapByCode,weights,entries,preds,activeShop);
+  // Use frozenCodeData if available, else compute once for display
+  var codeData=frozenPred.frozenCodeData||null;
+  if(!codeData){
+    var sorted2=sortCodesByGrade(top5Codes,frozen,snapByCode,weights,entries,preds,activeShop);
+    top5Codes=sorted2;
+    codeData=sorted2._codeData||{};
+  } else {
+    top5Codes=sortCodesByGrade(top5Codes,frozen,snapByCode,weights,entries,preds,activeShop);
+    codeData=top5Codes._codeData||codeData;
+  }
 
   function frozenRow(c,type){
-    var scorePct=Math.round((frozen[c]||0)/fullMax*100);
-    var snap=snapByCode[c]||{};
-    var consensus=buildSignalConsensus(c,snap,weights,weights);
-    var topDriving=consensus.yesSignals.slice(0,2).map(function(k){return SIGNAL_NAMES&&SIGNAL_NAMES[k]||k;}).join(' \u00B7 ');
-    var grade=buildCodeConfidenceGrade(c,snap,weights,entries,preds,activeShop,scorePct);
-    var typeIcon=type==='top5'?'':type==='promoted'?'&#x1F52C;':type==='watchout'?'&#x26A0;&#xFE0F;':'&#x1F3AF;';
-    var col=type==='top5'?'var(--text)':type==='promoted'?'var(--green)':type==='watchout'?'var(--gold)':'var(--teal)';
-
-    // Per-code historical hit rate (2nd number)
-    var hr=buildCodeHitRate(c,preds);
-    // Combined indicator: weighted blend of signal strength and historical hit rate
-    var combinedPct, combinedCol, combinedLabel;
-    if(hr){
-      combinedPct=Math.round(scorePct*0.5 + hr.rate*0.5);
-      combinedCol=combinedPct>=60?'var(--green)':combinedPct>=35?'var(--gold)':'var(--red)';
-      combinedLabel=combinedPct+'%';
-    } else {
-      combinedPct=scorePct;
-      combinedCol='var(--muted)';
-      combinedLabel=scorePct+'%';
-    }
-    var hrDisplay=hr
-      ?'<span style="color:var(--muted);font-size:10px;font-family:var(--mono)"> \u00B7 '+hr.rate+'%('+hr.predicted+')</span>'
-      :'<span style="color:var(--muted);font-size:10px"> \u00B7 N/A</span>';
-
-    // Obs window state
+    var d=codeData[c]||{};
+    var combinedPct=d.combined!==undefined?d.combined:Math.round((frozen[c]||0)/fullMax*100);
+    var combinedCol=combinedPct>=60?'var(--green)':combinedPct>=35?'var(--gold)':'var(--red)';
+    var gradeStr=d.grade||'N';
+    var gradeCol=d.gradeCol||'var(--muted)';
+    var adapted=!!d.adapted;
+    var topDriving=d.topDriving||'';
+    var topSigKey=d.topSignalKey||null;
+    var hrRate=d.hrRate; var hrN=d.hrN;
     var obsState=(db.shops[activeShop]&&db.shops[activeShop].obsWindow&&
       db.shops[activeShop].obsWindow[c])||{state:'idle'};
-    var obsLabel='';
-    var obsCol='var(--muted)';
+    var obsLabel=''; var obsCol='var(--muted)';
     if(obsState.state==='confirmed'){obsLabel='CONFIRMED';obsCol='var(--green)';}
     else if(obsState.state==='watching'){obsLabel='WATCHING';obsCol='var(--gold)';}
     else if(obsState.state==='overdue'){obsLabel='OVERDUE';obsCol='var(--red)';}
     else if(obsState.state==='recovering'){obsLabel='RECOVERING';obsCol='var(--muted)';}
-
+    var typeIcon=type==='top5'?'':type==='promoted'?'&#x1F52C;':type==='watchout'?'&#x26A0;&#xFE0F;':'&#x1F3AF;';
+    var col=type==='top5'?'var(--text)':type==='promoted'?'var(--green)':type==='watchout'?'var(--gold)':'var(--teal)';
+    var barCol=topSigKey&&SIGNAL_COLORS[topSigKey]?SIGNAL_COLORS[topSigKey]:combinedCol;
+    var hrDisplay=hrRate!==null&&hrRate!==undefined
+      ?'<span style="color:'+(hrRate>=50?'var(--green)':hrRate>=30?'var(--gold)':'var(--red)')+';font-size:10px;font-family:var(--mono)"> \u00B7 '+hrRate+'%('+hrN+')</span>'
+      :'<span style="color:var(--muted);font-size:10px"> \u00B7 N/A</span>';
     return '<div class="pred-code-row">'
       +(typeIcon?'<span style="font-size:11px;min-width:16px">'+typeIcon+'</span>':'<span style="min-width:16px"></span>')
       +'<span class="pred-code" style="color:'+col+'">'+c+'</span>'
-      +'<span class="pred-grade" style="color:'+grade.col+'">['+grade.grade+']'
-        +(grade.adapted?'<sup style="color:var(--green);font-size:7px">&#x2605;</sup>':'')
+      +'<span class="pred-grade" style="color:'+gradeCol+'">['+gradeStr+']'
+        +(adapted?'<sup style="color:var(--green);font-size:7px">&#x2605;</sup>':'')
         +(obsLabel?'<span style="font-size:8px;color:'+obsCol+';margin-left:3px">'+obsLabel+'</span>':'')
       +'</span>'
-      +'<div class="pred-bar-track"><div class="pred-bar-fill" style="width:'+combinedPct+'%;background:'+combinedCol+'"></div></div>'
-      +'<span class="pred-pct" style="color:'+combinedCol+';font-weight:700">'+combinedLabel
-        +(hr?'<span style="color:'+(hr.rate>=50?'var(--green)':hr.rate>=30?'var(--gold)':'var(--red)')+';font-size:10px;font-family:var(--mono)"> \u00B7 '+hr.rate+'%('+hr.predicted+')</span>'
-            :'<span style="color:var(--muted);font-size:10px"> \u00B7 N/A</span>')
-      +'</span>'
+      +'<div class="pred-bar-track"><div class="pred-bar-fill" style="width:'+combinedPct+'%;background:'+barCol+'"></div></div>'
+      +'<span class="pred-pct" style="color:'+combinedCol+';font-weight:700">'+combinedPct+'%'+hrDisplay+'</span>'
       +'<span class="pred-sigs" style="font-size:9px;color:var(--muted)">'+topDriving+'</span>'
       +'</div>';
   }
@@ -4608,18 +4605,25 @@ function renderTrackScore(){
     var fullMax=Math.max.apply(null,Object.values(predScores).concat([0.001]));
     // Apply grade sort at display time to ensure consistent order with PREDICT
     top5Codes=sortCodesByGrade(top5Codes,predScores,snapByCode,weights,entries,preds,activeShop);
+    var trackCodeData=frozenPred.frozenCodeData||null;
+    if(!trackCodeData){
+      // Old prediction without frozenCodeData — compute once for display
+      var tcSorted=sortCodesByGrade(top5Codes,predScores,snapByCode,weights,entries,preds,activeShop);
+      top5Codes=tcSorted;
+      trackCodeData=tcSorted._codeData||{};
+    }
     html+='<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Frozen prediction grades</div>';
     html+=top5Codes.map(function(c){
-      var pct=Math.round((predScores[c]||0)/fullMax*100);
-      var snap=snapByCode[c]||{};
-      var grade=buildCodeConfidenceGrade(c,snap,weights,entries,preds,activeShop,pct);
-      var hr=buildCodeHitRate(c,preds);
-      var combined=hr?Math.round(pct*0.5+hr.rate*0.5):pct;
+      var d=trackCodeData[c]||{};
+      var combined=d.combined!==undefined?d.combined:Math.round((predScores[c]||0)/fullMax*100);
       var combinedCol=combined>=60?'var(--green)':combined>=35?'var(--gold)':'var(--red)';
+      var gradeStr=d.grade||'N';
+      var gradeCol=d.gradeCol||'var(--muted)';
+      var adapted=!!d.adapted;
       var obsState=(obs[c]&&obs[c].state!=='idle')?'<span style="font-size:9px;color:var(--gold)"> '+obs[c].state.toUpperCase()+'</span>':'';
       return '<div style="display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid var(--border)">'
         +'<span class="mono" style="font-weight:900;min-width:28px;color:var(--accent)">'+c+'</span>'
-        +'<span style="font-size:11px;font-weight:900;font-family:var(--mono);color:'+grade.col+'">['+grade.grade+']'+(grade.adapted?'<sup style="color:var(--green);font-size:7px">&#x2605;</sup>':'')+'</span>'
+        +'<span style="font-size:11px;font-weight:900;font-family:var(--mono);color:'+gradeCol+'">['+gradeStr+']'+(adapted?'<sup style="color:var(--green);font-size:7px">&#x2605;</sup>':'')+'</span>'
         +'<div style="flex:1;height:4px;background:var(--surface3);border-radius:2px;overflow:hidden">'
           +'<div style="width:'+combined+'%;height:100%;background:'+combinedCol+';border-radius:2px"></div>'
         +'</div>'
@@ -5341,6 +5345,7 @@ var allPredsSoFar=db.shops[letter].predictions||[];
 // Sort codes by grade at freeze time
 var snapByCodeRebuild={};Object.keys(compactSnaps).forEach(function(c){var s=compactSnaps[c];var d={};Object.keys(s).forEach(function(k){d[k]=s[k]/100;});snapByCodeRebuild[c]=d;});
 var top5CodesRebuild=sortCodesByGrade(finalTop5.map(function(x){return x[0];}),fNorm,snapByCodeRebuild,finalResult.weights,allEntries,allPredsSoFar,letter);
+var frozenCodeDataRebuild=top5CodesRebuild._codeData||{};
 var frozenSummaryRebuild=buildPlainEnglishSummary(allEntries,allPredsSoFar,top5CodesRebuild,finalResult,letter)||'';
 var frozenConfRebuild=buildRefillConfidenceScore(allEntries,allPredsSoFar,top5CodesRebuild,finalResult,letter)||null;
 db.shops[letter].predictions.push({
@@ -5352,6 +5357,7 @@ regimeAtTime:{shifting:regimeNow.shifting,overlapScore:regimeNow.overlapScore,no
 scores:finalTop5.reduce(function(o,x){o[x[0]]=Math.round(x[1]/fMax*100);return o;},{}),
 frozenScores:fNorm,
 frozenSnapshots:compactSnaps,
+frozenCodeData:frozenCodeDataRebuild,
 frozenSummary:frozenSummaryRebuild,
 frozenConf:frozenConfRebuild,
 weightsAtTime:Object.assign({},finalResult.weights),
@@ -5407,6 +5413,7 @@ var surpriseCodes2=nextEntry.codes.filter(function(c){
 // Sort codes by grade at freeze time
 var snapByCode2={};Object.keys(compactSnaps2).forEach(function(c){var s=compactSnaps2[c];var d={};Object.keys(s).forEach(function(k){d[k]=s[k]/100;});snapByCode2[c]=d;});
 var sortedTop5Codes=sortCodesByGrade(top5.map(function(x){return x[0];}),normScores,snapByCode2,result.weights,trainEntries,shopPreds(letter),letter);
+var frozenCodeData2=sortedTop5Codes._codeData||{};
 var pred={
 id:predId2,createdDate:trainEntries[trainEntries.length-1].date,
 modelVersion:SIGNAL_VERSION,
@@ -5417,6 +5424,7 @@ triggeredOutcome:{},regimeAtTime:{shifting:regimeNow2.shifting,overlapScore:regi
 scores:top5.reduce(function(o,x){o[x[0]]=Math.round(x[1]/top5Max*100);return o;},{}),
 frozenScores:normScores,
 frozenSnapshots:compactSnaps2,
+frozenCodeData:frozenCodeData2,
 weightsAtTime:Object.assign({},result.weights),
 status:resolveStatus(outcome),
 outcome:outcome,
@@ -5502,21 +5510,19 @@ function predCardHTML(pred, canResolve, trainEntries, trainPreds){
     var outcomeCol=isHit?'var(--green)':isMiss?'var(--red)':'var(--muted)';
     var icon=isHit?'&#x2713;':isMiss?'&#x2717;':'&#xB7;';
     var scorePct=maxScore>0?Math.round((allScores[c]||0)/maxScore*100):0;
-    var allPredSnap=getSnapshotForPred(pred);
-    var isCompactSnap=!!(pred.frozenSnapshots&&pred.modelVersion);
-    var decompAllSnap=decompressSnap(allPredSnap,isCompactSnap);
-    var rawSnap=decompAllSnap[c]||{};
-    var grade=te.length>=3?buildCodeConfidenceGrade(c,rawSnap,wts,te,tp,activeShop,scorePct):{grade:'\u2014',col:'var(--muted)'};
-    // Combined % using only predictions resolved before this one (tp)
-    var hrHist=buildCodeHitRate(c,tp);
-    var combinedPct=hrHist?Math.round(scorePct*0.5+hrHist.rate*0.5):scorePct;
+    // Read from frozenCodeData if available — never recalculate
+    var fcd=pred.frozenCodeData&&pred.frozenCodeData[c]?pred.frozenCodeData[c]:null;
+    var gradeStr=fcd?fcd.grade:'\u2014';
+    var gradeCol=fcd?fcd.gradeCol:'var(--muted)';
+    var adapted=fcd?!!fcd.adapted:false;
+    var combinedPct=fcd?fcd.combined:scorePct;
     var combinedCol=combinedPct>=60?'var(--green)':combinedPct>=35?'var(--gold)':'var(--red)';
     var codeColor=type==='top5'?(isHit?'var(--green)':isMiss?'var(--red)':'var(--text)'):typeCol[type];
     return '<div style="display:flex;align-items:center;gap:5px;padding:3px 0">'
       +(typeIcon[type]?'<span style="font-size:10px;min-width:16px">'+typeIcon[type]+'</span>':'<span style="min-width:16px"></span>')
       +'<span class="mono" style="font-size:13px;font-weight:900;min-width:28px;color:'+codeColor+'">'+c+'</span>'
       +(outcome?'<span style="font-size:11px;font-weight:700;color:'+outcomeCol+'">'+icon+'</span>':'<span style="min-width:12px"></span>')
-      +'<span style="font-size:10px;font-weight:900;font-family:var(--mono);color:'+grade.col+'">['+grade.grade+']</span>'
+      +'<span style="font-size:10px;font-weight:900;font-family:var(--mono);color:'+gradeCol+'">['+gradeStr+']'+(adapted?'<sup style="color:var(--green);font-size:7px">&#x2605;</sup>':'')+'</span>'
       +'<div style="flex:1;height:4px;background:var(--surface3);border-radius:2px;overflow:hidden">'
         +'<div style="width:'+combinedPct+'%;height:100%;background:'+(isHit?'var(--green)':isMiss?'var(--red)':combinedCol)+';border-radius:2px"></div>'
       +'</div>'
