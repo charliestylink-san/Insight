@@ -4563,15 +4563,17 @@ function renderTrackScore(){
     +(ms.hitRate!==null?'<span style="font-size:12px;color:var(--muted)">'+ms.hitRate+'% hit &#xB7; '+ms.slotCov+'% slot</span>':'')
     +'</div>';
 
-  // Show frozen confidence + grades from the most recently matched prediction
-  // This is the same prediction shown in the most recent card below
+  // TRACK top shows current pending prediction (A) — same as PREDICT
+  // This is what will be checked against the next refill
   var pending=preds.filter(function(p){return p.status==='pending';});
-  var lastMatched=preds.filter(function(p){return p.status!=='pending'&&p.outcome;});
-  lastMatched=lastMatched.length?[lastMatched[lastMatched.length-1]]:[];
-  // Use pending if it exists (after rebuild, before next refill)
-  // Use last matched if no pending (after refill saved, before rebuild)
+  var allMatched=preds.filter(function(p){return p.status!=='pending'&&p.outcome;});
+  allMatched=allMatched.slice().sort(function(a,b){
+    return (a.actualDate||a.createdDate).localeCompare(b.actualDate||b.createdDate);
+  });
+  // After refill+rebuild: pending=A+1, last matched=A → top shows A+1
+  // Before refill: pending=A, no new matched → top shows A
   var frozenPred=pending.length?pending[pending.length-1]:
-                 lastMatched.length?lastMatched[0]:null;
+    allMatched.length?allMatched[allMatched.length-1]:null;
   if(frozenPred&&frozenPred.frozenConf){
     var fc=frozenPred.frozenConf;
     var confNum=fc.score||fc.confidence||0;
@@ -4654,6 +4656,9 @@ function renderTrackHistory(){
   var entries2=shopEntries(activeShop);
   var predsAll=shopPreds(activeShop);
   var resolved=predsAll.filter(function(p){return p.status!=='pending'&&p.outcome;});
+  resolved=resolved.slice().sort(function(a,b){
+    return (a.actualDate||a.createdDate).localeCompare(b.actualDate||b.createdDate);
+  });
 
   var chartEl=document.getElementById('track-accuracy-chart');
   var histEl=document.getElementById('track-history');
