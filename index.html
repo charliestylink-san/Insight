@@ -2489,6 +2489,35 @@ missed.forEach(function(m){
 return normaliseWeights(optW);
 }
 
+function precomputeAnchorCache(letter, currentW){
+  // Called by Learner — never by display functions
+  // Pre-computes btCache for top anchors so renderBestPredList reads cache only
+  db=loadDB();
+  var preds=shopPreds(letter);
+  var candidates=preds.filter(function(p){
+    return p.status!=='pending'&&p.outcome&&p.weightsAtTime&&!p.btCache;
+  }).sort(function(a,b){
+    var ha=0,ta=0,hb=0,tb=0;
+    Object.values(a.outcome).forEach(function(v){ta++;if(v==='hit')ha++;});
+    Object.values(b.outcome).forEach(function(v){tb++;if(v==='hit')hb++;});
+    return (tb?hb/tb:0)-(ta?ha/ta:0);
+  }).slice(0,5);
+  var w=currentW||getWeights(letter);
+  candidates.forEach(function(p){
+    var fromDate=p.actualDate||p.createdDate;
+    var anchorBT=backtestWeights(letter,p.weightsAtTime,fromDate);
+    var currentBT=backtestWeights(letter,w,fromDate);
+    if(anchorBT&&currentBT){
+      db=loadDB();
+      var dbPred=db.shops[letter].predictions.find(function(q){return q.id===p.id;});
+      if(dbPred){
+        dbPred.btCache={rate:anchorBT.hitRate,n:anchorBT.detail.length,diff:anchorBT.hitRate-currentBT.hitRate};
+        saveDB(db);
+      }
+    }
+  });
+}
+
 function runBackgroundLearner(letter){
 if(!letter) return;
 db=loadDB();
@@ -2616,6 +2645,8 @@ if(!shouldUpdate||sameModel||!readyToSurface){
     };
   }
   updateCodeLifts(letter,preds,db);
+  // Pre-compute anchor backtests regardless of surfacing decision
+  precomputeAnchorCache(letter,currentW);
   saveDB(db);
   if(activeTab==="predict") renderLearnerAlert(letter);
   return;
@@ -2656,8 +2687,12 @@ db.shops[letter].learnerAlert={
   missedOpportunities:(analysis.missedOpportunities||[]).slice(0,3)
 };
 updateCodeLifts(letter,preds,db);
+
+// Pre-compute anchor backtests for Optimize section — display reads cache only
+precomputeAnchorCache(letter,currentW);
+
 saveDB(db);
-if(activeTab==="predict") renderLearnerAlert(letter);
+if(activeTab==='predict') renderLearnerAlert(letter);
 }
 function updateCodeLifts(letter,preds,db){
 var codeLifts=db.shops[letter].codeSignalLifts||{};
@@ -3327,12 +3362,16 @@ function sortCodesByGrade(codes, frozenScores, snapByCode, weights, entries, pre
     var combined=hr?Math.round(pct*0.5+hr.rate*0.5):pct;
     var consensus=buildSignalConsensus(c,snap,weights,weights);
     var topDriving=consensus.yesSignals.slice(0,2).map(function(k){return SIGNAL_NAMES&&SIGNAL_NAMES[k]||k;}).join(' \u00B7 ');
+    var obsWindow=letter&&db&&db.shops&&db.shops[letter]&&db.shops[letter].obsWindow
+      ?db.shops[letter].obsWindow:{};
+    var obsRaw=obsWindow[c]||{state:'idle'};
     codeData[c]={
       pct:pct, combined:combined,
       grade:grade.grade, gradeCol:grade.col, adapted:!!grade.adapted,
       hrRate:hr?hr.rate:null, hrN:hr?hr.predicted:null,
       topDriving:topDriving,
-      topSignalKey:consensus.yesSignals[0]||null
+      topSignalKey:consensus.yesSignals[0]||null,
+      obsState:obsRaw.state||'idle'
     };
   });
   var sorted=codes.slice().sort(function(a,b){
@@ -4418,15 +4457,20 @@ function renderPredictionCodes(result,entries,preds,frozenPred){
   var isCompact=!!(frozenPred.frozenSnapshots&&frozenPred.modelVersion);
   var rawSnap=getSnapshotForPred(frozenPred);
   var snapByCode=decompressSnap(rawSnap,isCompact);
-  // Use frozenCodeData if available — frozen order and values, no recalculation
+  // Use frozenCodeData — no recalculation ever
   var codeData=frozenPred.frozenCodeData||null;
   if(!codeData){
-    // Old prediction without frozenCodeData — compute once for display only
-    var sorted2=sortCodesByGrade(top5Codes,frozen,snapByCode,weights,entries,preds,activeShop);
-    top5Codes=sorted2;
-    codeData=sorted2._codeData||{};
+    // Old prediction without frozenCodeData — use stored order and score% only
+    codeData={};
+    top5Codes.forEach(function(c){
+      codeData[c]={
+        grade:'—', gradeCol:'var(--muted)', adapted:false,
+        combined:Math.round((frozen[c]||0)/fullMax*100),
+        hrRate:null, hrN:null, topDriving:'', topSignalKey:null
+      };
+    });
   }
-  // top5Codes order is already frozen — do not re-sort
+  // top5Codes order is frozen — do not re-sort
 
   function frozenRow(c,type){
     var d=codeData[c]||{};
@@ -4438,13 +4482,12 @@ function renderPredictionCodes(result,entries,preds,frozenPred){
     var topDriving=d.topDriving||'';
     var topSigKey=d.topSignalKey||null;
     var hrRate=d.hrRate; var hrN=d.hrN;
-    var obsState=(db.shops[activeShop]&&db.shops[activeShop].obsWindow&&
-      db.shops[activeShop].obsWindow[c])||{state:'idle'};
     var obsLabel=''; var obsCol='var(--muted)';
-    if(obsState.state==='confirmed'){obsLabel='CONFIRMED';obsCol='var(--green)';}
-    else if(obsState.state==='watching'){obsLabel='WATCHING';obsCol='var(--gold)';}
-    else if(obsState.state==='overdue'){obsLabel='OVERDUE';obsCol='var(--red)';}
-    else if(obsState.state==='recovering'){obsLabel='RECOVERING';obsCol='var(--muted)';}
+    var frozenObs=d.obsState||'idle';
+    if(frozenObs==='confirmed'){obsLabel='CONFIRMED';obsCol='var(--green)';}
+    else if(frozenObs==='watching'){obsLabel='WATCHING';obsCol='var(--gold)';}
+    else if(frozenObs==='overdue'){obsLabel='OVERDUE';obsCol='var(--red)';}
+    else if(frozenObs==='recovering'){obsLabel='RECOVERING';obsCol='var(--muted)';}
     var typeIcon=type==='top5'?'':type==='promoted'?'&#x1F52C;':type==='watchout'?'&#x26A0;&#xFE0F;':'&#x1F3AF;';
     var col=type==='top5'?'var(--text)':type==='promoted'?'var(--green)':type==='watchout'?'var(--gold)':'var(--teal)';
     var barCol=topSigKey&&SIGNAL_COLORS[topSigKey]?SIGNAL_COLORS[topSigKey]:combinedCol;
@@ -4627,10 +4670,15 @@ function renderTrackScore(){
     var fullMax=Math.max.apply(null,Object.values(predScores).concat([0.001]));
     var trackCodeData=frozenPred.frozenCodeData||null;
     if(!trackCodeData){
-      // Old prediction without frozenCodeData — compute once for display
-      var tcSorted=sortCodesByGrade(top5Codes,predScores,snapByCode,weights,entries,preds,activeShop);
-      top5Codes=tcSorted;
-      trackCodeData=tcSorted._codeData||{};
+      // Old prediction without frozenCodeData — show scores in stored order, no recalculation
+      // Grade shown as [—] is honest: we don't know the grade at freeze time
+      trackCodeData={};
+      top5Codes.forEach(function(c){
+        trackCodeData[c]={
+          grade:'—', gradeCol:'var(--muted)', adapted:false,
+          combined:Math.round((predScores[c]||0)/fullMax*100)
+        };
+      });
     }
     // top5Codes order is frozen — do not re-sort
     var gradeLabel=predState==='liveResolved'
@@ -4644,7 +4692,8 @@ function renderTrackScore(){
       var gradeStr=d.grade||'N';
       var gradeCol=d.gradeCol||'var(--muted)';
       var adapted=!!d.adapted;
-      var obsState=(obs[c]&&obs[c].state!=='idle')?'<span style="font-size:9px;color:var(--gold)"> '+obs[c].state.toUpperCase()+'</span>':'';
+      var obsRawState=d.obsState||'idle';
+      var obsState=(obsRawState!=='idle')?'<span style="font-size:9px;color:'+(obsRawState==='confirmed'?'var(--green)':obsRawState==='overdue'?'var(--red)':'var(--gold)')+'"> '+obsRawState.toUpperCase()+'</span>':'';
       return '<div style="display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid var(--border)">'
         +'<span class="mono" style="font-weight:900;min-width:28px;color:var(--accent)">'+c+'</span>'
         +'<span style="font-size:11px;font-weight:900;font-family:var(--mono);color:'+gradeCol+'">['+gradeStr+']'+(adapted?'<sup style="color:var(--green);font-size:7px">&#x2605;</sup>':'')+'</span>'
@@ -4919,16 +4968,11 @@ function renderBestPredList(){
     return;
   }
   function hitRate(p){var h=0,t=0;Object.values(p.outcome).forEach(function(v){t++;if(v==='hit')h++;});return t?h/t:0;}
-  var pinned=db.shops[activeShop].pinnedPredId;
-  var currentW=getWeights(activeShop);
   var candidates=preds.slice().sort(function(a,b){return hitRate(b)-hitRate(a);}).slice(0,5);
 
-  // Phase 1: render immediately with single-prediction rates
   function rowHTML(p, btInfo){
     var h=Object.values(p.outcome).filter(function(v){return v==='hit';}).length;
-    var r=Math.round(hitRate(p)*100);
     var d=(p.actualDate||p.createdDate||'').slice(5);
-    var isPinned=String(p.id)===String(pinned);
     var btHTML='';
     if(btInfo){
       var btCol=btInfo.diff>0?'var(--green)':btInfo.diff<0?'var(--red)':'var(--muted)';
@@ -4937,70 +4981,21 @@ function renderBestPredList(){
         +' <span style="font-size:10px;color:var(--muted)">'+btInfo.n+' refills</span>'
         +' <span style="color:'+btCol+';font-size:10px">'+diffStr+'</span>';
     } else {
-      btHTML='<span style="font-size:10px;color:var(--muted)">computing\u2026</span>';
+      btHTML='<span style="font-size:10px;color:var(--muted)">run Rebuild to compute\u2026</span>';
     }
-    return '<div id="bprow-'+p.id+'" style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">'
+    return '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">'
       +'<div style="flex:1">'
         +'<div style="font-size:10px;color:var(--muted);margin-bottom:1px">Backtest '+btHTML+'</div>'
         +'<div>'
           +'<span class="mono" style="font-size:11px;color:var(--muted)">'+h+'/'+p.predictedCodes.length+' on '+d+'</span>'
-          +(isPinned?'<span style="font-size:10px;color:var(--gold);margin-left:6px">&#x2605; anchored</span>':'')
-        +'</div>'
-        +'<div style="font-size:11px;color:var(--muted);margin-top:1px">'
-          +p.predictedCodes.map(function(c){
-            return '<span style="color:'+(p.outcome[c]==='hit'?'var(--green)':'var(--muted)')+'">'+c+'</span>';
-          }).join(' ')
+          +' <span style="font-size:10px;color:var(--muted)">\u00B7 '+p.predictedCodes.join(' ')+'</span>'
         +'</div>'
       +'</div>'
-      +'<button class="btn btn-secondary btn-sm" '
-        +'style="'+(isPinned?'border-color:var(--gold);color:var(--gold)':'')+'" '
-        +'onclick="useBestPredModel(\''+p.id+'\')">'
-        +(isPinned?'&#x2605; Anchored':'Use this')
-      +'</button>'
-    +'</div>';
+      +'<button class="btn btn-secondary btn-sm" onclick="useBestPredModel(\''+p.id+'\')">Use this</button>'
+      +'</div>';
   }
-
-  // Render immediately
+  // Read btCache only — computed by Learner in background, never in display layer
   el.innerHTML=candidates.map(function(p){return rowHTML(p,p.btCache||null);}).join('');
-
-  // Phase 2: backtest each row lazily — skip if already cached
-  // Cache current model once for all anchor comparisons
-  var currentCacheKey='current-'+activeShop;
-  var currentBTCache=db.shops[activeShop].currentBTCache||{};
-
-  candidates.forEach(function(p, idx){
-    if(p.btCache){return;} // already computed — skip
-    setTimeout(function(){
-      db=loadDB();
-      var fromDate=p.actualDate||p.createdDate;
-
-      // Use cached current model result if same fromDate
-      var cachedCur=currentBTCache[fromDate];
-      if(!cachedCur){
-        var btCurResult=backtestWeights(activeShop,currentW,fromDate);
-        cachedCur={rate:btCurResult?btCurResult.hitRate:null,n:btCurResult?btCurResult.detail.length:0};
-        currentBTCache[fromDate]=cachedCur;
-        db.shops[activeShop].currentBTCache=currentBTCache;
-      }
-
-      var bt=backtestWeights(activeShop,p.weightsAtTime,fromDate);
-      var btInfo=bt?{
-        rate:bt.hitRate,
-        n:bt.detail.length,
-        diff:cachedCur.rate!==null?bt.hitRate-cachedCur.rate:null
-      }:null;
-
-      // Cache on prediction object so next open is instant
-      if(btInfo){
-        db=loadDB();
-        var pred2=db.shops[activeShop].predictions.find(function(q){return q.id===p.id;});
-        if(pred2){pred2.btCache=btInfo; saveDB(db);}
-      }
-
-      var row=document.getElementById('bprow-'+p.id);
-      if(row) row.outerHTML=rowHTML(p,btInfo);
-    }, idx*400); // 400ms apart — gives buildWeightedScoreDirect time to finish
-  });
 }
 
 function backtestWeights(letter, weights, fromDate){
@@ -5122,12 +5117,14 @@ function useBestPredModel(predId){
   if(!pred||!pred.weightsAtTime) return;
   var fromDate=pred.actualDate||pred.createdDate;
 
-  // Backtest anchor weights vs current weights from anchor date forward
-  var anchorTest=backtestWeights(activeShop,pred.weightsAtTime,fromDate);
+  // Use cached backtest if available — computed by Learner in background
+  // Only run live backtest if cache missing (explicit user action — acceptable)
+  var cached=pred.btCache||null;
+  var anchorTest=cached?{hitRate:cached.rate,detail:{length:cached.n}}:backtestWeights(activeShop,pred.weightsAtTime,fromDate);
   var currentWeights=getWeights(activeShop);
-  var currentTest=backtestWeights(activeShop,currentWeights,fromDate);
-  var diff=anchorTest&&currentTest?anchorTest.hitRate-currentTest.hitRate:null;
-  var btN=anchorTest?anchorTest.detail.length:0;
+  var currentTest=cached?{hitRate:cached.rate-cached.diff}:backtestWeights(activeShop,currentWeights,fromDate);
+  var diff=anchorTest&&currentTest?Math.round(anchorTest.hitRate-currentTest.hitRate):null;
+  var btN=cached?cached.n:(anchorTest?anchorTest.detail.length:0);
 
   // Cache result on prediction object so next open is instant
   db=loadDB();
@@ -5311,6 +5308,7 @@ function onRebuildDone(letter, count){
   // Run learner immediately after rebuild so alert is ready
   setTimeout(function(){
     runBackgroundLearner(letter);
+    precomputeAnchorCache(letter, getWeights(letter));
     if(activeTab==='predict') renderPredictTab();
     if(activeTab==='track')   renderTrackTab();
   }, 100);
@@ -5545,11 +5543,17 @@ function predCardHTML(pred, canResolve, trainEntries, trainPreds){
     var combinedPct=fcd?fcd.combined:scorePct;
     var combinedCol=combinedPct>=60?'var(--green)':combinedPct>=35?'var(--gold)':'var(--red)';
     var codeColor=type==='top5'?(isHit?'var(--green)':isMiss?'var(--red)':'var(--text)'):typeCol[type];
+    var frozenObs=fcd?fcd.obsState||'idle':'idle';
+    var obsTag='';
+    if(frozenObs==='confirmed') obsTag='<span style="font-size:8px;color:var(--green);margin-left:2px">CONF</span>';
+    else if(frozenObs==='watching') obsTag='<span style="font-size:8px;color:var(--gold);margin-left:2px">WATCH</span>';
+    else if(frozenObs==='overdue') obsTag='<span style="font-size:8px;color:var(--red);margin-left:2px">OVRD</span>';
+    else if(frozenObs==='recovering') obsTag='<span style="font-size:8px;color:var(--muted);margin-left:2px">REC</span>';
     return '<div style="display:flex;align-items:center;gap:5px;padding:3px 0">'
       +(typeIcon[type]?'<span style="font-size:10px;min-width:16px">'+typeIcon[type]+'</span>':'<span style="min-width:16px"></span>')
       +'<span class="mono" style="font-size:13px;font-weight:900;min-width:28px;color:'+codeColor+'">'+c+'</span>'
       +(outcome?'<span style="font-size:11px;font-weight:700;color:'+outcomeCol+'">'+icon+'</span>':'<span style="min-width:12px"></span>')
-      +'<span style="font-size:10px;font-weight:900;font-family:var(--mono);color:'+gradeCol+'">['+gradeStr+']'+(adapted?'<sup style="color:var(--green);font-size:7px">&#x2605;</sup>':'')+'</span>'
+      +'<span style="font-size:10px;font-weight:900;font-family:var(--mono);color:'+gradeCol+'">['+gradeStr+']'+(adapted?'<sup style="color:var(--green);font-size:7px">&#x2605;</sup>':'')+obsTag+'</span>'
       +'<div style="flex:1;height:4px;background:var(--surface3);border-radius:2px;overflow:hidden">'
         +'<div style="width:'+combinedPct+'%;height:100%;background:'+(isHit?'var(--green)':isMiss?'var(--red)':combinedCol)+';border-radius:2px"></div>'
       +'</div>'
