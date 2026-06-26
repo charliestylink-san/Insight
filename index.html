@@ -4846,11 +4846,30 @@ var renderPredictionCodes = function(pred){
   var fcd=pred.frozenCodeData||{};
   var frozen=pred.frozenScores||pred.scores||{};
   var fullMax=Math.max.apply(null,Object.values(frozen).concat([0.001]));
+  // If frozenCodeData missing, compute once now and cache on pred
+  if(!Object.keys(fcd).length&&pred.frozenSnapshots){
+    var isCompact=!!(pred.frozenSnapshots&&pred.modelVersion);
+    var rawSnap=getSnapshotForPred(pred);
+    var snapByCode=decompressSnap(rawSnap,isCompact);
+    var weights=pred.weightsAtTime||getWeights(activeShop);
+    var preds=shopPreds(activeShop);
+    var entries=shopEntries(activeShop);
+    pred.predictedCodes.forEach(function(c){
+      var pct=Math.round((frozen[c]||0)/fullMax*100);
+      var g=buildCodeConfidenceGrade(c,snapByCode[c]||{},weights,entries,preds,activeShop,pct);
+      fcd[c]={grade:g.grade,gradeCol:g.col,adapted:!!g.adapted,combined:pct,
+              hrRate:null,hrN:null,topDriving:'',topSignalKey:null,obsState:'idle'};
+    });
+    // Save so next render is instant
+    db=loadDB();
+    var dbPred=db.shops[activeShop]&&db.shops[activeShop].predictions.find(function(p){return p.id===pred.id;});
+    if(dbPred&&!Object.keys(dbPred.frozenCodeData||{}).length){dbPred.frozenCodeData=fcd;saveDB(db);}
+  }
 
   function codeRow(c,type){
     var d=fcd[c]||{};
     var combined=d.combined!==undefined?d.combined:Math.round((frozen[c]||0)/fullMax*100);
-    var grade=d.grade||'\u2014';
+    var grade=d.grade||'N';
     var gradeCol=d.gradeCol||'var(--muted)';
     var adapted=!!d.adapted;
     var hrRate=d.hrRate; var hrN=d.hrN;
@@ -5003,11 +5022,25 @@ var renderTrackScore = function(){
       +'</div>';
     }
 
-    // Code grades — frozenCodeData only, no fallback
+    // Code grades — from frozenCodeData, compute if missing
     var frozen=frozenPred.frozenScores||frozenPred.scores||{};
     var fcd=frozenPred.frozenCodeData||{};
     var top5=frozenPred.predictedCodes||[];
     var fullMax=Math.max.apply(null,Object.values(frozen).concat([0.001]));
+    // If frozenCodeData empty, compute from frozen snapshot
+    if(!Object.keys(fcd).length&&frozenPred.frozenSnapshots){
+      var isC=!!(frozenPred.frozenSnapshots&&frozenPred.modelVersion);
+      var rSnap=getSnapshotForPred(frozenPred);
+      var sByCode=decompressSnap(rSnap,isC);
+      var wts=frozenPred.weightsAtTime||getWeights(activeShop);
+      var allP=shopPreds(activeShop);
+      var allE=shopEntries(activeShop);
+      top5.forEach(function(c){
+        var pct=Math.round((frozen[c]||0)/fullMax*100);
+        var g=buildCodeConfidenceGrade(c,sByCode[c]||{},wts,allE,allP,activeShop,pct);
+        fcd[c]={grade:g.grade,gradeCol:g.col,adapted:!!g.adapted,combined:pct,obsState:'idle'};
+      });
+    }
     var gradeLabel=predState==='liveResolved'
       ?'Last prediction \u00B7 tested '+(frozenPred.actualDate||'').slice(5)
       :'Frozen prediction grades';
@@ -5016,7 +5049,7 @@ var renderTrackScore = function(){
       var d=fcd[c]||{};
       var combined=d.combined!==undefined?d.combined:Math.round((frozen[c]||0)/fullMax*100);
       var combinedCol=combined>=60?'var(--green)':combined>=35?'var(--gold)':'var(--red)';
-      var gradeStr=d.grade||'\u2014';
+      var gradeStr=d.grade||'N';
       var gradeCol=d.gradeCol||'var(--muted)';
       var adapted=!!d.adapted;
       var obsRaw=d.obsState||'idle';
@@ -5100,7 +5133,7 @@ var renderTrackHistory = function(){
       var d=fcd[c]||{};
       var combined=d.combined!==undefined?d.combined:Math.round((frozen[c]||0)/maxS*100);
       var combinedCol=combined>=60?'var(--green)':combined>=35?'var(--gold)':'var(--red)';
-      var gradeStr=d.grade||'\u2014';
+      var gradeStr=d.grade||'N';
       var gradeCol=d.gradeCol||'var(--muted)';
       var adapted=!!d.adapted;
       var isHit=p.outcome[c]==='hit'; var isMiss=p.outcome[c]==='miss';
