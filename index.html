@@ -5535,15 +5535,25 @@ function predCardHTML(pred, canResolve, trainEntries, trainPreds){
     var outcomeCol=isHit?'var(--green)':isMiss?'var(--red)':'var(--muted)';
     var icon=isHit?'&#x2713;':isMiss?'&#x2717;':'&#xB7;';
     var scorePct=maxScore>0?Math.round((allScores[c]||0)/maxScore*100):0;
-    // Read from frozenCodeData — no live recalculation ever
+    // Read from frozenCodeData if available — no live recalculation
     var fcd=pred.frozenCodeData&&pred.frozenCodeData[c]?pred.frozenCodeData[c]:null;
-    var gradeStr=fcd?fcd.grade:'N';
-    var gradeCol=fcd?fcd.gradeCol:'var(--muted)';
-    var adapted=fcd?!!fcd.adapted:false;
-    var combinedPct=fcd?fcd.combined:scorePct;
+    var gradeStr,gradeCol,adapted,combinedPct,frozenObs;
+    if(fcd){
+      gradeStr=fcd.grade; gradeCol=fcd.gradeCol; adapted=!!fcd.adapted;
+      combinedPct=fcd.combined; frozenObs=fcd.obsState||'idle';
+    } else {
+      // Old prediction without frozenCodeData — compute from frozen snapshot at prediction time
+      // Uses te (trainEntries) and tp (trainPreds) which are the historical context at that date
+      var oldSnap=decompressSnap(getSnapshotForPred(pred),!!(pred.frozenSnapshots&&pred.modelVersion));
+      var oldWts=pred.weightsAtTime||{};
+      var oldG=te.length>=3?buildCodeConfidenceGrade(c,oldSnap[c]||{},oldWts,te,tp,activeShop,scorePct):{grade:'N',col:'var(--muted)',adapted:false};
+      var oldHR=buildCodeHitRate(c,tp);
+      gradeStr=oldG.grade; gradeCol=oldG.col; adapted=!!oldG.adapted;
+      combinedPct=oldHR?Math.round(scorePct*0.5+oldHR.rate*0.5):scorePct;
+      frozenObs='idle';
+    }
     var combinedCol=combinedPct>=60?'var(--green)':combinedPct>=35?'var(--gold)':'var(--red)';
     var codeColor=type==='top5'?(isHit?'var(--green)':isMiss?'var(--red)':'var(--text)'):typeCol[type];
-    var frozenObs=fcd?fcd.obsState||'idle':'idle';
     var obsTag='';
     if(frozenObs==='confirmed') obsTag='<span style="font-size:8px;color:var(--green);margin-left:2px">CONF</span>';
     else if(frozenObs==='watching') obsTag='<span style="font-size:8px;color:var(--gold);margin-left:2px">WATCH</span>';
