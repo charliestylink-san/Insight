@@ -4184,6 +4184,21 @@ function handleImportFile(evt){
 // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
 // PREDICT TAB
 // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+// ════════════════════════════════════════════════════════════════
+// SINGLE SOURCE OF TRUTH — one function called by PREDICT and TRACK
+// Never diverges. No branching in callers.
+// ════════════════════════════════════════════════════════════════
+function getCurrentPred(preds){
+  // Priority 1: pending (after rebuild, before next refill)
+  var pending=preds.filter(function(p){return p.status==='pending';});
+  if(pending.length) return {pred:pending[pending.length-1], state:'pending'};
+  // Priority 2: liveResolved sorted by actualDate (after refill, before rebuild)
+  var live=preds.filter(function(p){return p.liveResolved&&p.outcome;});
+  live=live.slice().sort(function(a,b){return (b.actualDate||'').localeCompare(a.actualDate||'');});
+  if(live.length) return {pred:live[0], state:'liveResolved'};
+  return {pred:null, state:'none'};
+}
+
 function renderPredictTab(){
   if(!activeShop){
     ['signal-perf-panel','refill-confidence','plain-english','prediction-codes','pairs-panel']
@@ -4194,16 +4209,29 @@ function renderPredictTab(){
   var preds=shopPreds(activeShop);
   var entries=shopEntries(activeShop);
 
-  // Get frozen pending prediction
-  var pending=preds.filter(function(p){return p.status==='pending';});
-  var pred=pending.length?pending[pending.length-1]:null;
+  // Get frozen prediction via single authoritative selector
+  var currentPredResult=getCurrentPred(preds);
+  var pred=currentPredResult.pred;
+  var predState=currentPredResult.state;
+
+  // PREDICT shows frozen pending only — if no pending, show "run Rebuild"
+  // liveResolved is for TRACK top only, not PREDICT display
+  if(predState!=='pending'||!pred){
+    ['refill-confidence','plain-english','prediction-codes']
+      .forEach(function(id){var el=document.getElementById(id);
+        if(el)el.innerHTML='<div class="empty"><p>No prediction — run Rebuild</p></div>';});
+    document.getElementById('signal-perf-panel').innerHTML='';
+    document.getElementById('pairs-panel').innerHTML='';
+    renderLearnerAlert(activeShop);
+    return;
+  }
 
   // Accept pred if it has frozenScores OR scores (older predictions may use scores only)
   var predScores=pred&&(pred.frozenScores&&Object.keys(pred.frozenScores).length
     ?pred.frozenScores
     :pred.scores&&Object.keys(pred.scores||{}).length?pred.scores:null);
 
-  if(!pred||!predScores){
+  if(!predScores){
     ['refill-confidence','plain-english','prediction-codes']
       .forEach(function(id){var el=document.getElementById(id);
         if(el)el.innerHTML='<div class="empty"><p>No prediction yet — run Rebuild</p></div>';});
@@ -4561,17 +4589,10 @@ function renderTrackScore(){
     +(ms.hitRate!==null?'<span style="font-size:12px;color:var(--muted)">'+ms.hitRate+'% hit &#xB7; '+ms.slotCov+'% slot</span>':'')
     +'</div>';
 
-  // TRACK top shows current pending prediction (A) — same as PREDICT
-  // This is what will be checked against the next refill
-  var pending=preds.filter(function(p){return p.status==='pending';});
-  var allMatched=preds.filter(function(p){return p.status!=='pending'&&p.outcome;});
-  allMatched=allMatched.slice().sort(function(a,b){
-    return (a.actualDate||a.createdDate).localeCompare(b.actualDate||b.createdDate);
-  });
-  // After refill+rebuild: pending=A+1, last matched=A → top shows A+1
-  // Before refill: pending=A, no new matched → top shows A
-  var frozenPred=pending.length?pending[pending.length-1]:
-    allMatched.length?allMatched[allMatched.length-1]:null;
+  // Single source of truth — same selector as PREDICT
+  var currentPredResult=getCurrentPred(preds);
+  var frozenPred=currentPredResult.pred;
+  var predState=currentPredResult.state;
   if(frozenPred&&frozenPred.frozenConf){
     var fc=frozenPred.frozenConf;
     var confNum=fc.score||fc.confidence||0;
@@ -4612,7 +4633,10 @@ function renderTrackScore(){
       trackCodeData=tcSorted._codeData||{};
     }
     // top5Codes order is frozen — do not re-sort
-    html+='<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Frozen prediction grades</div>';
+    var gradeLabel=predState==='liveResolved'
+      ?'Last prediction \u00B7 tested '+(frozenPred.actualDate||'').slice(5)
+      :'Frozen prediction grades';
+    html+='<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">'+gradeLabel+'</div>';
     html+=top5Codes.map(function(c){
       var d=trackCodeData[c]||{};
       var combined=d.combined!==undefined?d.combined:Math.round((predScores[c]||0)/fullMax*100);
@@ -5513,19 +5537,12 @@ function predCardHTML(pred, canResolve, trainEntries, trainPreds){
     var outcomeCol=isHit?'var(--green)':isMiss?'var(--red)':'var(--muted)';
     var icon=isHit?'&#x2713;':isMiss?'&#x2717;':'&#xB7;';
     var scorePct=maxScore>0?Math.round((allScores[c]||0)/maxScore*100):0;
-    // Read from frozenCodeData if available — never recalculate
+    // Read from frozenCodeData — no live recalculation ever
     var fcd=pred.frozenCodeData&&pred.frozenCodeData[c]?pred.frozenCodeData[c]:null;
-    var gradeStr,gradeCol,adapted,combinedPct;
-    if(fcd){
-      gradeStr=fcd.grade; gradeCol=fcd.gradeCol; adapted=!!fcd.adapted; combinedPct=fcd.combined;
-    } else {
-      // Old prediction — compute from frozen snapshot once
-      var oldSnap=decompressSnap(getSnapshotForPred(pred),!!(pred.frozenSnapshots&&pred.modelVersion));
-      var oldG=te.length>=3?buildCodeConfidenceGrade(c,oldSnap[c]||{},pred.weightsAtTime||{},te,tp,activeShop,scorePct):{grade:'\u2014',col:'var(--muted)',adapted:false};
-      gradeStr=oldG.grade; gradeCol=oldG.col; adapted=!!oldG.adapted;
-      var oldHR=buildCodeHitRate(c,tp);
-      combinedPct=oldHR?Math.round(scorePct*0.5+oldHR.rate*0.5):scorePct;
-    }
+    var gradeStr=fcd?fcd.grade:'N';
+    var gradeCol=fcd?fcd.gradeCol:'var(--muted)';
+    var adapted=fcd?!!fcd.adapted:false;
+    var combinedPct=fcd?fcd.combined:scorePct;
     var combinedCol=combinedPct>=60?'var(--green)':combinedPct>=35?'var(--gold)':'var(--red)';
     var codeColor=type==='top5'?(isHit?'var(--green)':isMiss?'var(--red)':'var(--text)'):typeCol[type];
     return '<div style="display:flex;align-items:center;gap:5px;padding:3px 0">'
