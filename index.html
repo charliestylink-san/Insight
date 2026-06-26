@@ -3356,7 +3356,6 @@ return {hadPrediction:hadPrediction,resolved:resolvedPreds,worstStatus:resolvedP
 function sortCodesByGrade(codes, frozenScores, snapByCode, weights, entries, preds, letter){
   var gradeOrder={A:0,B:1,C:2,D:3,N:4};
   var fullMax=Math.max.apply(null,Object.values(frozenScores).concat([1]));
-  // Pre-compute grades and hit rates for all codes
   var codeData={};
   codes.forEach(function(c){
     var pct=Math.round((frozenScores[c]||0)/fullMax*100);
@@ -3384,8 +3383,7 @@ function sortCodesByGrade(codes, frozenScores, snapByCode, weights, entries, pre
     if(aOrder!==bOrder) return aOrder-bOrder;
     return codeData[b].combined-codeData[a].combined;
   });
-  sorted._codeData=codeData;
-  lastSortCodeData=codeData; // safe plain object — callers read this immediately
+  lastSortCodeData=codeData;
   return sorted;
 }
 var lastSortCodeData={};
