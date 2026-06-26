@@ -239,6 +239,7 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:10px 0}
         <button class="btn btn-primary btn-sm" onclick="saveToiCloud()">☁️ Save to iCloud</button>
         <button class="btn btn-secondary btn-sm" onclick="exportFullBackup()">📤 Export JSON</button>
         <button class="btn btn-secondary btn-sm" onclick="triggerImport()">📥 Import JSON</button>
+        <button class="btn btn-danger btn-sm" onclick="clearAllData()">🗑️ Clear All Data</button>
       </div>
       <input type="file" id="import-file" accept=".json" style="display:none" onchange="handleImportFile(event)">
       <div id="backup-result"></div>
@@ -3202,20 +3203,6 @@ if(bak&&bak.shops&&Object.keys(bak.shops).length){
 localStorage.setItem(DB_KEY,JSON.stringify(bak));
 return bak;
 }
-var oldKeys=['inv_intel_v3','inv_intel_v2','inv_intel_v1'];
-for(var i=0;i<oldKeys.length;i++){
-try{
-var old=JSON.parse(localStorage.getItem(oldKeys[i]));
-if(old&&old.shops&&Object.keys(old.shops).length){
-Object.keys(old.shops).forEach(function(c){
-if(!old.shops[c].predictions) old.shops[c].predictions=[];
-});
-localStorage.setItem(DB_KEY,JSON.stringify(old));
-localStorage.setItem(DB_BAK,JSON.stringify(old));
-return old;
-}
-}catch(e2){}
-}
 return {shops:{}};
 }catch(e){ return {shops:{}}; }
 }
@@ -3536,6 +3523,16 @@ function decompressSnap(snap,isCompact){
   });
   return out;
 }
+function clearAllData(){
+  if(!confirm('Clear ALL data? This cannot be undone. Export a backup first.')) return;
+  localStorage.clear();
+  db={shops:{}};
+  activeShop=null;
+  renderShopPills();
+  renderDataTab();
+  showToast('All data cleared','ok');
+}
+
 function exportFullBackup(){
 db=loadDB();
 var json=JSON.stringify(db,null,2);
