@@ -5512,10 +5512,17 @@ function predCardHTML(pred, canResolve, trainEntries, trainPreds){
     var scorePct=maxScore>0?Math.round((allScores[c]||0)/maxScore*100):0;
     // Read from frozenCodeData if available — never recalculate
     var fcd=pred.frozenCodeData&&pred.frozenCodeData[c]?pred.frozenCodeData[c]:null;
-    var gradeStr=fcd?fcd.grade:'\u2014';
-    var gradeCol=fcd?fcd.gradeCol:'var(--muted)';
-    var adapted=fcd?!!fcd.adapted:false;
-    var combinedPct=fcd?fcd.combined:scorePct;
+    var gradeStr,gradeCol,adapted,combinedPct;
+    if(fcd){
+      gradeStr=fcd.grade; gradeCol=fcd.gradeCol; adapted=!!fcd.adapted; combinedPct=fcd.combined;
+    } else {
+      // Old prediction — compute from frozen snapshot once
+      var oldSnap=decompressSnap(getSnapshotForPred(pred),!!(pred.frozenSnapshots&&pred.modelVersion));
+      var oldG=te.length>=3?buildCodeConfidenceGrade(c,oldSnap[c]||{},pred.weightsAtTime||{},te,tp,activeShop,scorePct):{grade:'\u2014',col:'var(--muted)',adapted:false};
+      gradeStr=oldG.grade; gradeCol=oldG.col; adapted=!!oldG.adapted;
+      var oldHR=buildCodeHitRate(c,tp);
+      combinedPct=oldHR?Math.round(scorePct*0.5+oldHR.rate*0.5):scorePct;
+    }
     var combinedCol=combinedPct>=60?'var(--green)':combinedPct>=35?'var(--gold)':'var(--red)';
     var codeColor=type==='top5'?(isHit?'var(--green)':isMiss?'var(--red)':'var(--text)'):typeCol[type];
     return '<div style="display:flex;align-items:center;gap:5px;padding:3px 0">'
