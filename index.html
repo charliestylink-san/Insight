@@ -4844,24 +4844,30 @@ var renderPredictionCodes = function(pred){
   var fcd=pred.frozenCodeData||{};
   var frozen=pred.frozenScores||pred.scores||{};
   var fullMax=Math.max.apply(null,Object.values(frozen).concat([0.001]));
-  // If frozenCodeData missing, compute once now and cache on pred
-  if(!Object.keys(fcd).length&&pred.frozenSnapshots){
-    var isCompact=!!(pred.frozenSnapshots&&pred.modelVersion);
-    var rawSnap=getSnapshotForPred(pred);
-    var snapByCode=decompressSnap(rawSnap,isCompact);
+  // If frozenCodeData empty, compute grades now from best available data
+  if(!Object.keys(fcd).length){
+    var allEntries=shopEntries(activeShop);
+    var allPreds=shopPreds(activeShop);
     var weights=pred.weightsAtTime||getWeights(activeShop);
-    var preds=shopPreds(activeShop);
-    var entries=shopEntries(activeShop);
+    var snapByCode={};
+    if(pred.frozenSnapshots){
+      var isCompact=!!(pred.frozenSnapshots&&pred.modelVersion);
+      var rawSnap=getSnapshotForPred(pred);
+      snapByCode=decompressSnap(rawSnap,isCompact);
+    }
     pred.predictedCodes.forEach(function(c){
       var pct=Math.round((frozen[c]||0)/fullMax*100);
-      var g=buildCodeConfidenceGrade(c,snapByCode[c]||{},weights,entries,preds,activeShop,pct);
+      var snap=snapByCode[c]||{};
+      var g=allEntries.length>=3
+        ?buildCodeConfidenceGrade(c,snap,weights,allEntries,allPreds,activeShop,pct)
+        :{grade:'N',col:'var(--muted)',adapted:false};
       fcd[c]={grade:g.grade,gradeCol:g.col,adapted:!!g.adapted,combined:pct,
               hrRate:null,hrN:null,topDriving:'',topSignalKey:null,obsState:'idle'};
     });
-    // Save so next render is instant
+    // Cache on db so next open is instant
     db=loadDB();
-    var dbPred=db.shops[activeShop]&&db.shops[activeShop].predictions.find(function(p){return p.id===pred.id;});
-    if(dbPred&&!Object.keys(dbPred.frozenCodeData||{}).length){dbPred.frozenCodeData=fcd;saveDB(db);}
+    var dbPred=db.shops[activeShop]&&(db.shops[activeShop].predictions||[]).find(function(p){return p.id===pred.id;});
+    if(dbPred){dbPred.frozenCodeData=fcd;saveDB(db);}
   }
 
   function codeRow(c,type){
@@ -5025,17 +5031,23 @@ var renderTrackScore = function(){
     var fcd=frozenPred.frozenCodeData||{};
     var top5=frozenPred.predictedCodes||[];
     var fullMax=Math.max.apply(null,Object.values(frozen).concat([0.001]));
-    // If frozenCodeData empty, compute from frozen snapshot
-    if(!Object.keys(fcd).length&&frozenPred.frozenSnapshots){
-      var isC=!!(frozenPred.frozenSnapshots&&frozenPred.modelVersion);
-      var rSnap=getSnapshotForPred(frozenPred);
-      var sByCode=decompressSnap(rSnap,isC);
-      var wts=frozenPred.weightsAtTime||getWeights(activeShop);
-      var allP=shopPreds(activeShop);
+    // If frozenCodeData empty, compute from current entries
+    if(!Object.keys(fcd).length){
       var allE=shopEntries(activeShop);
+      var allP=shopPreds(activeShop);
+      var wts=frozenPred.weightsAtTime||getWeights(activeShop);
+      var sByCode={};
+      if(frozenPred.frozenSnapshots){
+        var isC2=!!(frozenPred.frozenSnapshots&&frozenPred.modelVersion);
+        var rSnap2=getSnapshotForPred(frozenPred);
+        sByCode=decompressSnap(rSnap2,isC2);
+      }
       top5.forEach(function(c){
         var pct=Math.round((frozen[c]||0)/fullMax*100);
-        var g=buildCodeConfidenceGrade(c,sByCode[c]||{},wts,allE,allP,activeShop,pct);
+        var snap=sByCode[c]||{};
+        var g=allE.length>=3
+          ?buildCodeConfidenceGrade(c,snap,wts,allE,allP,activeShop,pct)
+          :{grade:'N',col:'var(--muted)',adapted:false};
         fcd[c]={grade:g.grade,gradeCol:g.col,adapted:!!g.adapted,combined:pct,obsState:'idle'};
       });
     }
