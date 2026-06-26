@@ -3877,11 +3877,13 @@ function toggleArchiveAllShops(){
   renderArchive();
 }
 
-function deleteEntry(id){
+function deleteEntry(shop, date){
+  if(!shop&&activeShop) shop=activeShop;
+  if(!shop||!date) return;
   confirmAction('Delete entry?','This refill entry will be permanently removed.',function(){
     db=loadDB();
-    if(!activeShop||!db.shops[activeShop]) return;
-    db.shops[activeShop].entries=(db.shops[activeShop].entries||[]).filter(function(e){return String(e.id)!==String(id);});
+    if(!db.shops[shop]) return;
+    db.shops[shop].entries=(db.shops[shop].entries||[]).filter(function(e){return e.date!==date;});
     saveDB(db);
     renderArchive();
     showToast('Entry deleted');
@@ -4564,6 +4566,23 @@ var rebuildPredictions=function(letter){
 // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
 // SAVE REFILL (reimplemented clean)
 // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+function forceSaveEntry(date){
+  var codes=window._pendingCodes;
+  if(!codes||!activeShop) return;
+  window._pendingCodes=null;
+  var resolveResult=addEntry(activeShop,date,codes,'text');
+  renderShopPills(); renderArchive();
+  document.getElementById('text-input').value='';
+  document.getElementById('tag-grid').innerHTML='';
+  var resultEl=document.getElementById('entry-result');
+  if(resultEl){
+    resultEl.innerHTML='<div class="alert alert-ok">&#x2705; Saved</div>';
+    setTimeout(function(){if(resultEl)resultEl.innerHTML='';},3000);
+  }
+  if(activeTab==='predict') setTimeout(renderPredictTab,100);
+  if(activeTab==='track')   setTimeout(renderTrackTab,100);
+}
+
 function saveTextEntry(){
   if(!activeShop){showToast('Select a shop first');return;}
   var date=document.getElementById('entry-date').value||todayStr();
@@ -4577,6 +4596,16 @@ function saveTextEntry(){
   var dup=isDuplicateInShop(activeShop,date,codes);
   if(dup){
     if(resultEl) resultEl.innerHTML='<div class="alert alert-warn">Duplicate \u2014 '+date+' already saved: '+dup.codes.join(' ')+'</div>';
+    return;
+  }
+  // Warn if same codes already saved in another shop on same date
+  var sig=refillSig(codes);
+  var crossShop=Object.keys(db.shops||{}).filter(function(s){
+    return s!==activeShop && shopEntries(s).find(function(e){return e.date===date&&refillSig(e.codes)===sig;});
+  });
+  if(crossShop.length){
+    if(resultEl) resultEl.innerHTML='<div class="alert alert-warn">Warning \u2014 same codes already saved in '+crossShop.join(', ')+' on '+date+'. Save anyway? <button class="btn btn-primary btn-sm" onclick="forceSaveEntry(\''+date+'\')">Save anyway</button></div>';
+    window._pendingCodes=codes;
     return;
   }
   var resolveResult=addEntry(activeShop,date,codes,'text');
