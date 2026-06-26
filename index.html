@@ -3384,9 +3384,11 @@ function sortCodesByGrade(codes, frozenScores, snapByCode, weights, entries, pre
     if(aOrder!==bOrder) return aOrder-bOrder;
     return codeData[b].combined-codeData[a].combined;
   });
-  sorted._codeData=codeData; // attach for caller to harvest
+  sorted._codeData=codeData;
+  lastSortCodeData=codeData; // safe plain object — callers read this immediately
   return sorted;
 }
+var lastSortCodeData={};
 
 function autoSavePrediction(letter){
 db=loadDB();
@@ -3438,7 +3440,7 @@ var top5Scores=top5.reduce(function(o,x){o[x[0]]=Math.round(x[1]/top5Max*100);re
 // Sort codes by grade at freeze time — display order fixed permanently
 var snapByCodeFreeze={}; Object.keys(compactSnaps).forEach(function(c){var s=compactSnaps[c];var d={};Object.keys(s).forEach(function(k){d[k]=s[k]/100;});snapByCodeFreeze[c]=d;});
 var top5CodesFreeze=sortCodesByGrade(top5.map(function(x){return x[0];}),frozenScores,snapByCodeFreeze,result.weights,entries,preds,letter);
-var frozenCodeData=top5CodesFreeze._codeData||{};
+var frozenCodeData=lastSortCodeData;
 var frozenSummary=buildPlainEnglishSummary(entries,preds,top5CodesFreeze,result,letter)||'';
 var frozenConf=buildRefillConfidenceScore(entries,preds,top5CodesFreeze,result,letter)||null;
 var predId=Date.now();
@@ -4404,7 +4406,7 @@ var allPredsSoFar=db.shops[letter].predictions||[];
 // Sort codes by grade at freeze time
 var snapByCodeRebuild={};Object.keys(compactSnaps).forEach(function(c){var s=compactSnaps[c];var d={};Object.keys(s).forEach(function(k){d[k]=s[k]/100;});snapByCodeRebuild[c]=d;});
 var top5CodesRebuild=sortCodesByGrade(finalTop5.map(function(x){return x[0];}),fNorm,snapByCodeRebuild,finalResult.weights,allEntries,allPredsSoFar,letter);
-var frozenCodeDataRebuild=top5CodesRebuild._codeData||{};
+var frozenCodeDataRebuild=lastSortCodeData;
 var frozenSummaryRebuild=buildPlainEnglishSummary(allEntries,allPredsSoFar,top5CodesRebuild,finalResult,letter)||'';
 var frozenConfRebuild=buildRefillConfidenceScore(allEntries,allPredsSoFar,top5CodesRebuild,finalResult,letter)||null;
 db.shops[letter].predictions.push({
@@ -4472,7 +4474,7 @@ var surpriseCodes2=nextEntry.codes.filter(function(c){
 // Sort codes by grade at freeze time
 var snapByCode2={};Object.keys(compactSnaps2).forEach(function(c){var s=compactSnaps2[c];var d={};Object.keys(s).forEach(function(k){d[k]=s[k]/100;});snapByCode2[c]=d;});
 var sortedTop5Codes=sortCodesByGrade(top5.map(function(x){return x[0];}),normScores,snapByCode2,result.weights,trainEntries,shopPreds(letter),letter);
-var frozenCodeData2=sortedTop5Codes._codeData||{};
+var frozenCodeData2=lastSortCodeData;
 var pred={
 id:predId2,createdDate:trainEntries[trainEntries.length-1].date,
 modelVersion:SIGNAL_VERSION,
@@ -4681,6 +4683,8 @@ var showTab = function(tab){
 var selectShop = function(s){
   activeShop=s;
   renderShopPills();
+  var btn=document.getElementById('rebuild-active-btn');
+  if(btn) btn.style.display=activeShop?'inline-flex':'none';
   if(activeTab==='predict'){ renderPredictTab(); setTimeout(function(){runBackgroundLearner(s);precomputeAnchorCache(s,getWeights(s));},100); }
   if(activeTab==='track')   renderTrackTab();
   if(activeTab==='data')    renderDataTab();
@@ -5220,7 +5224,12 @@ var initApp = function(){
   db=loadDB();
   renderShopPills();
   var shops=Object.keys(db.shops||{});
-  if(shops.length){ activeShop=shops[0]; renderShopPills(); }
+  if(shops.length){
+    activeShop=shops[0];
+    renderShopPills();
+    var btn=document.getElementById('rebuild-active-btn');
+    if(btn) btn.style.display='inline-flex';
+  }
   showTab('data');
 }
 
