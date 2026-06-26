@@ -4460,13 +4460,14 @@ function renderPredictionCodes(result,entries,preds,frozenPred){
   // Use frozenCodeData — no recalculation ever
   var codeData=frozenPred.frozenCodeData||null;
   if(!codeData){
-    // Old prediction without frozenCodeData — use stored order and score% only
+    // Old prediction without frozenCodeData — compute from frozen snapshot at prediction time
     codeData={};
     top5Codes.forEach(function(c){
+      var pct=Math.round((frozen[c]||0)/fullMax*100);
+      var g=buildCodeConfidenceGrade(c,snapByCode[c]||{},weights,entries,preds,activeShop,pct);
       codeData[c]={
-        grade:'—', gradeCol:'var(--muted)', adapted:false,
-        combined:Math.round((frozen[c]||0)/fullMax*100),
-        hrRate:null, hrN:null, topDriving:'', topSignalKey:null
+        grade:g.grade, gradeCol:g.col, adapted:!!g.adapted,
+        combined:pct, hrRate:null, hrN:null, topDriving:'', topSignalKey:null, obsState:'idle'
       };
     });
   }
@@ -4670,13 +4671,14 @@ function renderTrackScore(){
     var fullMax=Math.max.apply(null,Object.values(predScores).concat([0.001]));
     var trackCodeData=frozenPred.frozenCodeData||null;
     if(!trackCodeData){
-      // Old prediction without frozenCodeData — show scores in stored order, no recalculation
-      // Grade shown as [—] is honest: we don't know the grade at freeze time
+      // Old prediction without frozenCodeData — compute from frozen snapshot at prediction time
       trackCodeData={};
       top5Codes.forEach(function(c){
+        var pct=Math.round((predScores[c]||0)/fullMax*100);
+        var g=buildCodeConfidenceGrade(c,snapByCode[c]||{},weights,entries,preds,activeShop,pct);
         trackCodeData[c]={
-          grade:'—', gradeCol:'var(--muted)', adapted:false,
-          combined:Math.round((predScores[c]||0)/fullMax*100)
+          grade:g.grade, gradeCol:g.col, adapted:!!g.adapted,
+          combined:pct, obsState:'idle'
         };
       });
     }
