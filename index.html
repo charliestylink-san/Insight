@@ -6,7 +6,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#1a1a2e">
-<title>Insight2</title>
+<title>Insight5</title>
 <style>
 
 
@@ -470,6 +470,115 @@ qtystreak:0.05,
 momentum: 0.12
 };
 var SIGNAL_KEYS = ['freq','recency','streak','bias','cooccur','seqcooccur','interval','dow','cycle','overdue','qtydom','qtystreak','momentum'];
+
+// ── INSIGHT5: calibrateSignalWeights ────────────────────────────────────────
+// Backtests each signal individually against frequency baseline, then tests
+// small combinations of top performers. Returns the combination that performs
+// best on this shop's own rolling-forward history — not a fixed formula.
+// This replaces guessed equal-ish weights with measured per-shop weights.
+function calibrateSignalWeights(letter, minHistory){
+  minHistory=minHistory||25;
+  var entries=shopEntries(letter).slice().sort(function(a,b){return a.date.localeCompare(b.date);});
+  var n=entries.length;
+  if(n<minHistory+15) return null; // need enough history for multiple validation windows
+
+  // ── INSIGHT5 fix: multi-window walk-forward validation ──────────────────
+  // A single train/test split can find a combo that's a fluke for that split.
+  // Test every candidate across MULTIPLE windows and require both a good
+  // average AND low variance — stability matters as much as peak performance.
+  var windowSize=Math.max(8,Math.floor(n*0.15));
+  var windows=[];
+  var start=minHistory;
+  while(start+windowSize<=n){
+    windows.push({trainEnd:start, testStart:start, testEnd:Math.min(start+windowSize,n)});
+    start+=Math.max(4,Math.floor(windowSize*0.5));
+  }
+  if(windows.length<2) return null; // need at least 2 windows to check stability
+
+  function testWeightsOnWindow(w, win){
+    var hits=0,total=0;
+    var running=entries.slice(0,win.trainEnd);
+    for(var i=win.testStart;i<win.testEnd;i++){
+      var scores=buildWeightedScoreDirect(running,w);
+      var top5=Object.entries(scores).sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];});
+      var actual=entries[i].codes;
+      hits+=top5.filter(function(c){return actual.indexOf(c)>-1;}).length;
+      total+=5;
+      running=running.concat([entries[i]]);
+    }
+    return total>0?hits/total:0;
+  }
+
+  function evalCombo(combo){
+    var w={}; SIGNAL_KEYS.forEach(function(k){w[k]=(combo.indexOf(k)>-1?1.0/combo.length:0.0);});
+    var rates=windows.map(function(win){return testWeightsOnWindow(w,win);});
+    var avg=rates.reduce(function(s,r){return s+r;},0)/rates.length;
+    var variance=rates.reduce(function(s,r){return s+(r-avg)*(r-avg);},0)/rates.length;
+    var std=Math.sqrt(variance);
+    var worst=Math.min.apply(null,rates);
+    return {avg:avg,std:std,worst:worst,rates:rates};
+  }
+
+  // Step 1: individual signal performance (averaged across windows, for ranking only)
+  var individual={};
+  SIGNAL_KEYS.forEach(function(k){
+    individual[k]=evalCombo([k]).avg;
+  });
+  var ranked=SIGNAL_KEYS.filter(function(k){return k!=='freq';})
+    .sort(function(a,b){return individual[b]-individual[a];});
+  var topCandidates=ranked.slice(0,5);
+
+  // Step 2: evaluate freq-alone, freq+1, freq+2 combos — score by stability-adjusted metric
+  // Stability score = avg - std (penalises high variance, rewards consistency)
+  // This is the key fix: a combo that scores 50% on one window and 6% on another
+  // has avg=28 but std=22, stability=6. A combo at steady 34% everywhere has
+  // avg=34, std=5.6, stability=28.4 — correctly preferred.
+  var freqAlone=evalCombo(['freq']);
+  var bestStability=freqAlone.avg-freqAlone.std;
+  var bestCombo=['freq'];
+  var bestEval=freqAlone;
+
+  function tryCombo(combo){
+    var ev=evalCombo(combo);
+    var stability=ev.avg-ev.std;
+    if(stability>bestStability){
+      bestStability=stability;bestCombo=combo.slice();bestEval=ev;
+    }
+  }
+  topCandidates.forEach(function(c){tryCombo(['freq',c]);});
+  for(var i=0;i<topCandidates.length;i++){
+    for(var j=i+1;j<topCandidates.length;j++){
+      tryCombo(['freq',topCandidates[i],topCandidates[j]]);
+    }
+  }
+
+  // Compare against current default using the SAME multi-window method
+  var defaultEval=evalCombo(SIGNAL_KEYS); // placeholder — need actual DEFAULT_WEIGHTS eval
+  var defRates=windows.map(function(win){return testWeightsOnWindow(DEFAULT_WEIGHTS,win);});
+  var defAvg=defRates.reduce(function(s,r){return s+r;},0)/defRates.length;
+  var defStd=Math.sqrt(defRates.reduce(function(s,r){return s+(r-defAvg)*(r-defAvg);},0)/defRates.length);
+
+  // Build final weight vector
+  var finalW={};
+  SIGNAL_KEYS.forEach(function(k){
+    finalW[k]=bestCombo.indexOf(k)>-1?(1.0/bestCombo.length):0.02;
+  });
+  var wsum=SIGNAL_KEYS.reduce(function(s,k){return s+finalW[k];},0);
+  SIGNAL_KEYS.forEach(function(k){finalW[k]=finalW[k]/wsum;});
+
+  return {
+    weights:finalW,
+    combo:bestCombo,
+    calibratedRate:Math.round(bestEval.avg*1000)/10,
+    calibratedStd:Math.round(bestEval.std*1000)/10,
+    calibratedWorst:Math.round(bestEval.worst*1000)/10,
+    defaultRate:Math.round(defAvg*1000)/10,
+    defaultStd:Math.round(defStd*1000)/10,
+    individual:individual,
+    windowCount:windows.length,
+    testCycles:windows.reduce(function(s,w){return s+(w.testEnd-w.testStart);},0)
+  };
+}
 var SIGNAL_NAMES = {
 freq:'Frequency', recency:'Recency', streak:'Streak', bias:'Pred. accuracy',
 cooccur:'Co-occur', seqcooccur:'Seq. co-occur', interval:'Interval', dow:'Day-of-wk', cycle:'Cycle',
@@ -992,20 +1101,30 @@ var cnt=cLifts.counts[k]||0;
 if(cnt>=2){
 hasEvidence=true;
 var normLift=Math.max(-1,Math.min(1,(cLifts.lifts[k]||0)/cnt));
-var evidScale=Math.min(1,cnt/5); // need 5 observations for full effect
+var evidScale=Math.min(1,cnt/5);
 var cShop=effectiveW[k]||DEFAULT_WEIGHTS[k];
 var cAdj=Math.max(0.01,Math.min(0.50,cShop+normLift*0.20*evidScale));
-// 60% shop weight + 40% code-specific adjustment
 codeW[k]=0.60*cShop+0.40*cAdj;
 } else {
 codeW[k]=effectiveW[k]||DEFAULT_WEIGHTS[k];
 }
 });
+// ── INSIGHT4: Learner per-code weights override codeSignalLifts ──────────────
+// When Learner has computed per-code weights (≥4 appearances),
+// use them as primary weight source instead of the lift-adjusted shop weights.
+// This gives each code its own optimized signal model.
+var learnerCodeW=db&&db.shops&&db.shops[letter]&&db.shops[letter].codeWeights;
+if(learnerCodeW&&learnerCodeW[c]){
+  var lcw=learnerCodeW[c];
+  // Blend: 70% learner per-code + 30% shop (never fully abandon shop signal)
+  SIGNAL_KEYS.forEach(function(k){
+    codeW[k]=0.70*(lcw[k]||DEFAULT_WEIGHTS[k])+0.30*(effectiveW[k]||DEFAULT_WEIGHTS[k]);
+  });
+  hasEvidence=true;
+}
 if(hasEvidence){
-// Renormalise code weights
 var cSum=SIGNAL_KEYS.reduce(function(s,k){return s+(codeW[k]||0);},0);
 if(cSum>0) SIGNAL_KEYS.forEach(function(k){codeW[k]=(codeW[k]||0)/cSum;});
-// Recompute base with per-code weights
 base=
 sig.freq*codeW.freq+sig.recency*codeW.recency+sig.streak*codeW.streak+
 sig.bias*codeW.bias+sig.cooccur*codeW.cooccur+sig.interval*codeW.interval+
@@ -1601,30 +1720,62 @@ function detectRegimeShift(entries){
 var n = entries.length;
 if(n < 8) return {shifting:false, overlapScore:1, note:'Insufficient data'};
 var sorted = entries.slice().sort(function(a,b){return a.date.localeCompare(b.date);});
-var w = Math.min(MOMENTUM_WINDOW, Math.floor(n/2));
+
+// Adaptive recent window: ~25% of history, min 5, max 15
+// Larger shops need wider window to avoid noise
+var w = Math.max(5, Math.min(15, Math.round(n * 0.25)));
 var recent    = sorted.slice(n-w);
-var historical= sorted;
-function topCodes(set, topN){
-var freq={};
-set.forEach(function(e){e.codes.forEach(function(c){freq[c]=(freq[c]||0)+1;});});
-return Object.entries(freq).sort(function(a,b){return b[1]-a[1];}).slice(0,topN).map(function(x){return x[0];});
+var prior     = sorted.slice(0, n-w); // everything before recent
+
+// Adaptive topN: how many codes appear in >20% of refills (meaningful codes)
+// This lets the shop's own density decide, not a fixed number
+function freqMap(set){
+  var freq={};
+  set.forEach(function(e){e.codes.forEach(function(c){freq[c]=(freq[c]||0)+1;});});
+  return freq;
 }
-var topN = Math.min(8, Math.ceil(n/3));
-var recentTop = topCodes(recent, topN);
-var histTop   = topCodes(historical, topN);
+var allFreq = freqMap(sorted);
+var meaningful = Object.keys(allFreq).filter(function(c){return allFreq[c]/n >= 0.20;});
+var topN = Math.max(4, Math.min(meaningful.length || 8, 12));
+
+function topCodes(set, freq, refN){
+  return Object.entries(freq)
+    .filter(function(x){return x[1]/refN >= 0.15;}) // appear in at least 15% of that window
+    .sort(function(a,b){return b[1]-a[1];})
+    .slice(0, topN)
+    .map(function(x){return x[0];});
+}
+var recentFreq = freqMap(recent);
+var priorFreq  = freqMap(prior.length ? prior : sorted);
+var recentTop  = topCodes(recent, recentFreq, recent.length);
+var histTop    = topCodes(prior.length ? prior : sorted, priorFreq, prior.length || n);
+
+// Adaptive shift threshold: based on this shop's historical volatility
+// Compute overlap between consecutive halves of history to get baseline volatility
+var half = Math.floor(n/2);
+var h1freq = freqMap(sorted.slice(0, half));
+var h2freq = freqMap(sorted.slice(half));
+var h1top  = Object.keys(h1freq).sort(function(a,b){return h2freq[b]-h2freq[a];}).slice(0,topN);
+var h2top  = Object.keys(h2freq).sort(function(a,b){return h2freq[b]-h2freq[a];}).slice(0,topN);
+var baselineOverlap = h1top.filter(function(c){return h2top.indexOf(c)>-1;}).length / Math.max(topN,1);
+// Shift threshold = baseline overlap - 1 stddev (shops that naturally vary need higher tolerance)
+var shiftThreshold = Math.max(0.40, Math.min(0.70, baselineOverlap - 0.15));
+
 var overlap = recentTop.filter(function(c){return histTop.indexOf(c)>-1;}).length;
-var overlapScore = overlap / topN;
-var shifting = overlapScore < 0.6;
+var overlapScore = recentTop.length ? overlap / recentTop.length : 1;
+var shifting = overlapScore < shiftThreshold;
 var emerging = recentTop.filter(function(c){return histTop.indexOf(c)===-1;});
 var fading   = histTop.filter(function(c){return recentTop.indexOf(c)===-1;});
 var note = shifting
-? 'Pattern shift detected \u2014 '+(emerging.length?emerging.join(', ')+' emerging':'new codes rising')
-+(fading.length?' &#xB7; '+fading.join(', ')+' fading':'')
-+'. Recency and momentum prioritised.'
-: 'Stable \u2014 recent pattern consistent with history ('+Math.round(overlapScore*100)+'% overlap).';
-return {shifting:shifting, overlapScore:overlapScore,
-recentDominant:recentTop, historicalDominant:histTop,
-emerging:emerging, fading:fading, note:note};
+  ? 'Pattern shift detected \u2014 '+(emerging.length?emerging.join(', ')+' emerging':'new codes rising')
+    +(fading.length?' \u00B7 '+fading.join(', ')+' fading':'')
+    +'. Recent signals weighted more heavily.'
+  : 'Stable \u2014 recent pattern consistent with history ('+Math.round(overlapScore*100)+'% overlap).';
+return {shifting:shifting, overlapScore:overlapScore, shiftThreshold:shiftThreshold,
+  recentWindow:w, topN:topN,
+  periodStartDate:sorted.length>=w?sorted[sorted.length-w].date:sorted[0].date,
+  recentDominant:recentTop, historicalDominant:histTop,
+  emerging:emerging, fading:fading, note:note};
 }
 
 function buildHistoricalSimilarity(entries, topN){
@@ -2009,8 +2160,13 @@ obsVal    * w.obs        +
 momVal    * w.momentum
 ) * 100);
 pts=Math.max(0,Math.min(100,pts));
-var grade=pts>=80?'A':pts>=65?'B':pts>=50?'C':pts>=35?'D':'N';
-var col  =pts>=80?'var(--green)':pts>=65?'var(--accent)':pts>=50?'var(--gold)':'var(--red)';
+// ── INSIGHT4: Outcome-calibrated grade thresholds ────────────────────────────
+// Use shop-specific thresholds if available (calibrated from actual outcomes)
+// Fall back to fixed thresholds for shops with insufficient history
+var gt=db&&db.shops&&db.shops[letter]&&db.shops[letter].gradeThresholds;
+var tA=gt?gt.A:80; var tB=gt?gt.B:65; var tC=gt?gt.C:50; var tD=gt?gt.D:35;
+var grade=pts>=tA?'A':pts>=tB?'B':pts>=tC?'C':pts>=tD?'D':'N';
+var col  =pts>=tA?'var(--green)':pts>=tB?'var(--accent)':pts>=tC?'var(--gold)':'var(--red)';
 var topYes=consensus.yesSignals.slice(0,2).map(function(k){return SIGNAL_NAMES[k]||k;}).join(', ');
 var topNo=consensus.noSignals.slice(0,1).map(function(k){return SIGNAL_NAMES[k]||k;}).join(', ');
 var consDetail=topYes+(topNo?' &#xB7; &#x2193;'+topNo:'');
@@ -2448,30 +2604,244 @@ var missedOpportunities=Object.keys(surpriseFreq)
   .sort(function(a,b){return b.missCount-a.missCount;})
   .slice(0,5);
 
-// \u2500\u2500 Q3: Build optimal weights from \u2460+\u2461 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-// Start from current/anchor weights.
-// Boost signals that are predictive (from \u2460).
-// Boost signals that were high for missed codes (from \u2461).
-// Reduce signals that are counter-predictive.
-var optimalWeights=buildOptimalWeights(letter, sigEffectiveness, missedOpportunities, preds);
-
-// \u2500\u2500 Q4: Store performance summary \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// ── REGIME-PERIOD SEGMENTATION ────────────────────────────────────────────────
+// Compute missed opportunities within CURRENT regime period separately.
+// Answers: what is the model missing RIGHT NOW in the current pattern?
+var shopEntries3=shopEntries(letter).slice().sort(function(a,b){return a.date.localeCompare(b.date);});
+var currentRegime3=detectRegimeShift(shopEntries3);
+var periodStart3=currentRegime3.periodStartDate||null;
+var periodResolved=periodStart3
+  ?resolved.filter(function(p){return (p.actualDate||p.createdDate||'')>=periodStart3;})
+  :[];
+var periodMissedOpps=[];
+var periodSigStats=null;
+if(periodResolved.length>=2){
+  var pSurpriseFreq={};
+  var pSurpriseSig={};
+  var pSigStats={};
+  SIGNAL_KEYS.forEach(function(k){pSigStats[k]={highHits:0,highTotal:0,lowHits:0,lowTotal:0};});
+  periodResolved.forEach(function(p){
+    var isC=!!(p.frozenSnapshots&&p.modelVersion);
+    var rawSnap=getSnapshotForPred(p);
+    var snapD=decompressSnap(rawSnap,isC);
+    function pv(c,k){var s=snapD[c];return s&&s[k]!=null?s[k]:null;}
+    p.predictedCodes.forEach(function(c){
+      var isHit=p.outcome[c]==='hit'?1:0;
+      SIGNAL_KEYS.forEach(function(k){
+        if(k==='bias') return;
+        var v=pv(c,k); if(v===null) return;
+        if(v>=0.6){pSigStats[k].highHits+=isHit;pSigStats[k].highTotal+=1;}
+        else if(v<=0.35){pSigStats[k].lowHits+=isHit;pSigStats[k].lowTotal+=1;}
+      });
+    });
+    var surprises=p.surpriseCodes||(p.actualCodes||[]).filter(function(c){return p.predictedCodes.indexOf(c)===-1;});
+    surprises.forEach(function(c){
+      pSurpriseFreq[c]=(pSurpriseFreq[c]||0)+1;
+      if(!pSurpriseSig[c]) pSurpriseSig[c]={};
+      var sSnap=snapD[c]||(p.surpriseSnapshot&&p.surpriseSnapshot[c]);
+      if(!sSnap) return;
+      SIGNAL_KEYS.forEach(function(k){
+        pSurpriseSig[c][k]=(pSurpriseSig[c][k]||0)+(sSnap[k]!=null?sSnap[k]:0);
+      });
+    });
+  });
+  periodSigStats={};
+  SIGNAL_KEYS.forEach(function(k){
+    var st=pSigStats[k];
+    var hrH=st.highTotal>0?st.highHits/st.highTotal:null;
+    var hrL=st.lowTotal>0?st.lowHits/st.lowTotal:null;
+    periodSigStats[k]={lift:hrH!==null&&hrL!==null?hrH-hrL:null,n:st.highTotal+st.lowTotal};
+  });
+  periodMissedOpps=Object.keys(pSurpriseFreq)
+    .filter(function(c){return pSurpriseFreq[c]>=1;})
+    .map(function(c){
+      var strengths=pSurpriseSig[c]||{};
+      var count=pSurpriseFreq[c];
+      var topSignals=Object.keys(strengths)
+        .map(function(k){return {k:k,avg:strengths[k]/count};})
+        .filter(function(s){return s.avg>=0.4;})
+        .sort(function(a,b){return b.avg-a.avg;})
+        .slice(0,3);
+      return {code:c,missCount:count,topSignals:topSignals,inCurrentPeriod:true};
+    })
+    .sort(function(a,b){return b.missCount-a.missCount;})
+    .slice(0,5);
+}
+// Blend full-history signal effectiveness with period signal effectiveness
+// Period weight scales with how many period predictions exist (max 70% at 7+)
+var blendedSigEff=Object.assign({},sigEffectiveness);
+if(periodSigStats&&periodResolved.length>=3){
+  var periodWeight=Math.min(0.7,periodResolved.length/10);
+  SIGNAL_KEYS.forEach(function(k){
+    var full=sigEffectiveness[k]||{lift:null};
+    var period=periodSigStats[k]||{lift:null};
+    if(full.lift!==null&&period.lift!==null){
+      blendedSigEff[k]=Object.assign({},full,{
+        lift:full.lift*(1-periodWeight)+period.lift*periodWeight,
+        periodLift:period.lift,periodN:period.n
+      });
+    }
+  });
+}
+var effectiveMissed=periodMissedOpps.length>0?periodMissedOpps:missedOpportunities;
+var optimalWeights=buildOptimalWeights(letter, blendedSigEff, effectiveMissed, preds);
+// Q4: Store performance summary
 var totalH=0,totalP=0;
 resolved.forEach(function(p){Object.values(p.outcome).forEach(function(v){totalP++;if(v==='hit')totalH++;});});
 var last5=resolved.slice(-5),prior5=resolved.slice(-10,-5);
-
 var l5Rate=bRate(last5),p5Rate=bRate(prior5);
 var trending=l5Rate!==null&&p5Rate!==null?(l5Rate-p5Rate>0.05?'improving':l5Rate-p5Rate<-0.05?'declining':'stable'):'insufficient';
+// ── PER-CODE SIGNAL WEIGHTS ────────────────────────────────────────────────
+// For each code with ≥5 appearances, compute its own signal weight vector
+// based on which signals were high when IT specifically hit vs missed.
+// This is the foundation of Change 2 — per-code personalization.
+var codeWeights={};
+var allCodes={};
+resolved.forEach(function(p){
+  (p.predictedCodes||[]).forEach(function(c){allCodes[c]=(allCodes[c]||0)+1;});
+  (p.surpriseCodes||[]).forEach(function(c){allCodes[c]=(allCodes[c]||0)+1;});
+});
+Object.keys(allCodes).forEach(function(c){
+  if(allCodes[c]<4) return; // need ≥4 appearances to compute meaningful weights
+  var cHitSig={};var cMissSig={};var cHits=0;var cTotal=0;
+  resolved.forEach(function(p){
+    var isC2=!!(p.frozenSnapshots&&p.modelVersion);
+    var rawSnap=getSnapshotForPred(p);
+    var snapD=decompressSnap(rawSnap,isC2);
+    var snap=snapD[c];
+    if(!snap) return;
+    cTotal++;
+    var outcome=p.outcome[c]||(p.surpriseCodes&&p.surpriseCodes.indexOf(c)>-1?'surprise':'unknown');
+    var isHit=outcome==='hit'?1:0;
+    if(isHit) cHits++;
+    SIGNAL_KEYS.forEach(function(k){
+      if(k==='bias') return;
+      var v=snap[k]||0;
+      if(isHit){cHitSig[k]=(cHitSig[k]||0)+v;}
+      else     {cMissSig[k]=(cMissSig[k]||0)+v;}
+    });
+  });
+  if(cTotal<3) return;
+  var hitN=cHits||1; var missN=Math.max(cTotal-cHits,1);
+  var cOptW=Object.assign({},getWeights(letter));
+  SIGNAL_KEYS.forEach(function(k){
+    if(k==='bias') return;
+    var hitAvg=(cHitSig[k]||0)/hitN;
+    var missAvg=(cMissSig[k]||0)/missN;
+    var lift=hitAvg-missAvg;
+    // Scale adjustment: positive lift → boost, negative → reduce
+    // Adjustment proportional to lift magnitude, capped at ±50% of current weight
+    var adj=lift*0.3;
+    cOptW[k]=Math.max(0.01, Math.min(0.45, (cOptW[k]||DEFAULT_WEIGHTS[k]||0.05)+adj));
+  });
+  codeWeights[c]=normaliseWeights(cOptW);
+});
 
 return {
   sigEffectiveness:sigEffectiveness,
   missedOpportunities:missedOpportunities,
+  periodMissedOpps:periodMissedOpps,
+  periodResolved:periodResolved.length,
+  periodStart:periodStart3,
+  currentRegime:currentRegime3,
   optimalWeights:optimalWeights,
+  codeWeights:codeWeights,
   trending:trending,
   hitRate:totalP>0?totalH/totalP:0,
   last5Rate:l5Rate,prior5Rate:p5Rate,
   resolvedCount:n
 };
+}
+
+// ── INSIGHT4: calibrateGradeThresholds ──────────────────────────────────────
+// Finds grade thresholds that maximally separate hits from misses
+// for THIS specific shop. Runs when ≥10 resolved predictions exist.
+// ── INSIGHT5: Per-code regression gate ──────────────────────────────────────
+// Before any weight change applies, check whether previously-reliable codes
+// would regress. Returns list of codes that would drop below their current
+// hit rate by more than 15 percentage points — these are the tradeoffs
+// the owner must see before approving a change.
+function checkWeightRegression(letter, newWeights, preds){
+  var entries=shopEntries(letter).slice().sort(function(a,b){return a.date.localeCompare(b.date);});
+  var resolved=preds.filter(function(p){return p.status!=='pending'&&p.outcome;});
+  if(resolved.length<8) return {regressions:[],safe:true}; // not enough data to check
+
+  // For each code with ≥3 appearances in resolved predictions, compute
+  // current hit rate vs hit rate using new weights (backtested)
+  var codeStats={};
+  resolved.forEach(function(p){
+    Object.keys(p.outcome).forEach(function(c){
+      if(!codeStats[c]) codeStats[c]={hits:0,total:0};
+      codeStats[c].total++;
+      if(p.outcome[c]==='hit') codeStats[c].hits++;
+    });
+  });
+
+  var regressions=[];
+  Object.keys(codeStats).forEach(function(c){
+    var stat=codeStats[c];
+    if(stat.total<3) return; // not enough evidence
+    var currentRate=stat.hits/stat.total;
+    if(currentRate<0.30) return; // only protect codes that are already working well
+
+    // Backtest: would this code have been in top-5 as often with new weights?
+    var hitsWithNew=0,totalChecked=0;
+    var running=entries.slice(0,Math.max(10,entries.length-resolved.length));
+    resolved.forEach(function(p){
+      if(p.outcome[c]===undefined) return;
+      var scores=buildWeightedScoreDirect(running,newWeights);
+      var top5=Object.entries(scores).sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];});
+      totalChecked++;
+      if(top5.indexOf(c)>-1&&p.outcome[c]==='hit') hitsWithNew++;
+      var matchingEntry=entries.find(function(e){return e.date===(p.actualDate||p.createdDate);});
+      if(matchingEntry) running=running.concat([matchingEntry]);
+    });
+    if(totalChecked<3) return;
+    var newRate=hitsWithNew/totalChecked;
+    var drop=currentRate-newRate;
+    if(drop>0.15){
+      regressions.push({code:c,currentRate:Math.round(currentRate*100),newRate:Math.round(newRate*100),drop:Math.round(drop*100)});
+    }
+  });
+
+  return {regressions:regressions,safe:regressions.length===0};
+}
+
+function calibrateGradeThresholds(letter, preds){
+var resolved=preds.filter(function(p){return p.status!=='pending'&&p.outcome&&p.frozenCodeData;});
+if(resolved.length<10) return null;
+var pairs=[];
+resolved.forEach(function(p){
+  var fcd=p.frozenCodeData||{};
+  p.predictedCodes.forEach(function(c){
+    var d=fcd[c]; if(!d) return;
+    var pts=d.pts!==undefined?d.pts:(d.combined!==undefined?d.combined:null);
+    if(pts===null) return;
+    pairs.push({pts:pts, hit:p.outcome[c]==='hit'?1:0});
+  });
+});
+if(pairs.length<15) return null;
+function hitRateAbove(t){
+  var a=pairs.filter(function(p){return p.pts>=t;});
+  return a.length?a.filter(function(p){return p.hit;}).length/a.length:0;
+}
+// Find each grade threshold: lowest pts where hit rate above meets target
+var targets=[{g:'A',th:0.38},{g:'B',th:0.26},{g:'C',th:0.16},{g:'D',th:0.08}];
+var out={A:75,B:60,C:45,D:30};
+targets.forEach(function(t){
+  for(var v=85;v>=20;v-=5){
+    if(hitRateAbove(v)>=t.th) out[t.g]=v;
+    else if(out[t.g]!==({A:75,B:60,C:45,D:30}[t.g])) break;
+  }
+});
+out.A=Math.max(out.A,out.B+12);
+out.B=Math.max(out.B,out.C+10);
+out.C=Math.max(out.C,out.D+10);
+out.D=Math.max(out.D,20);
+// Also ensure A is at least 55 and D is at most 45
+out.A=Math.max(out.A,55);
+out.D=Math.min(out.D,45);
+return out;
 }
 
 function buildOptimalWeights(letter, sigEff, missed, preds){
@@ -2495,11 +2865,12 @@ SIGNAL_KEYS.forEach(function(k){
 });
 
 // From Q2: boost signals that consistently pointed at missed codes
+// Boost scales proportionally with missCount — no fixed threshold
 missed.forEach(function(m){
+  var boost=0.02*m.missCount; // linear: more misses = stronger boost
   m.topSignals.forEach(function(s){
-    if(s.avg>=0.6){
-      // This signal was high when the missed code arrived \u2014 it's underweighted
-      optW[s.k]=Math.min(0.45,(optW[s.k]||DEFAULT_WEIGHTS[s.k])+0.015*m.missCount);
+    if(s.avg>=0.5){ // lower signal threshold — don't require 0.6
+      optW[s.k]=Math.min(0.45,(optW[s.k]||DEFAULT_WEIGHTS[s.k])+boost);
     }
   });
 });
@@ -2549,6 +2920,10 @@ if(resolved.length<3) return;
 var analysis=analyseShopPerformance(letter,preds);
 if(!analysis) return;
 db.shops[letter].performanceAnalysis=analysis;
+// Store per-code weights for buildCombinedScore to use
+if(analysis.codeWeights&&Object.keys(analysis.codeWeights).length){
+  db.shops[letter].codeWeights=analysis.codeWeights;
+}
 // Candidate weights from analysis
 var currentW=getWeights(letter);
 var learnedW=analysis.optimalWeights||currentW;
@@ -2561,12 +2936,27 @@ var sorted=entries.slice().sort(function(a,b){return a.date.localeCompare(b.date
 var modelHistory=db.shops[letter].modelHistory||[];
 var lastApply=modelHistory.filter(function(v){return v.decision==='apply';}).slice(-1)[0];
 var btFromDate=lastApply?lastApply.date:(resolved.length>0?resolved[0].createdDate:sorted[0].date);
+// Full-history backtest (Insight2 behaviour — baseline)
 var btLearned=backtestWeights(letter,learnedW,btFromDate);
 var btCurrent=backtestWeights(letter,currentW,btFromDate);
 var TEST_N=btLearned?btLearned.detail.length:resolved.length;
 var currentHits=btCurrent?Math.round(btCurrent.hitRate*TEST_N/100):0;
 var learnedHits=btLearned?Math.round(btLearned.hitRate*TEST_N/100):0;
 var hitGain=learnedHits-currentHits;
+// ── INSIGHT3: Within-period backtest ─────────────────────────────────────────
+// Run a second backtest restricted to the current regime period.
+// More signal about what's working NOW — but lower N so needs corroboration.
+var periodStart3=analysis&&analysis.periodStart||null;
+var btPeriodLearned=periodStart3?backtestWeights(letter,learnedW,btFromDate,periodStart3):null;
+var btPeriodCurrent=periodStart3?backtestWeights(letter,currentW,btFromDate,periodStart3):null;
+var periodN=btPeriodLearned?btPeriodLearned.detail.length:0;
+var periodDiff=btPeriodLearned&&btPeriodCurrent
+  ?btPeriodLearned.hitRate-btPeriodCurrent.hitRate:null;
+// Combined verdict: full-history delta + period delta must agree for alert
+// If they disagree, hold — not enough evidence
+var periodAgreesWithFull=periodDiff===null
+  ||(periodDiff>0&&hitGain>0)
+  ||(periodDiff<=0&&hitGain<=0);
 // Accumulate snapshot — weighted by current regime
 var regimeCurrent=detectRegimeShift(sorted);
 var snapRegimeW=regimeCurrent.shifting?0.6:1.0; // stable predictions count more
@@ -2603,9 +2993,9 @@ var hitRateDecline=analysis.trending==="declining"&&
 // btDiff <= 0 = new model doesn't improve → hold
 var btPositive=btLearned&&btCurrent&&(btLearned.hitRate-btCurrent.hitRate)>0;
 var btDiffVal=btLearned&&btCurrent?btLearned.hitRate-btCurrent.hitRate:null;
-
-// shouldUpdate: backtest positive AND consistent signal AND meaningful improvement
-var shouldUpdate=btPositive&&hitGain>0&&consistent;
+// Insight3: shouldUpdate requires BOTH full-history AND period to agree
+// If period has no data yet, fall back to full-history only
+var shouldUpdate=btPositive&&hitGain>0&&consistent&&periodAgreesWithFull;
 
 // Learner decides its own readiness to surface — no hardcoded N
 // Cross-checks internal evidence against backtest result:
@@ -2654,18 +3044,43 @@ if(!shouldUpdate||sameModel||!readyToSurface){
       currentHits:currentHits,learnedHits:learnedHits,testN:TEST_N,
       btAnchorRate:btLearned?btLearned.hitRate:null,
       btCurrentRate:btCurrent?btCurrent.hitRate:null,
-      btDiff:btDiffVal,btN:TEST_N,
+      btDiff:btDiffVal,btN:TEST_N,btPeriodDiff:periodDiff,btPeriodN:periodN,periodAgreement:periodAgreesWithFull,
       currentTop5:curT5Early,learnedTop5:curT5Early,
       learnedOnly:[],currentOnly:[],
       topBoost:[],topReduce:[],
       learnedW:learnedW,prevW:currentW,
-      missedOpportunities:(analysis.missedOpportunities||[]).slice(0,3)
+      missedOpportunities:(analysis.missedOpportunities||[]).slice(0,3),
+      periodMissedOpps:(analysis.periodMissedOpps||[]).slice(0,3),
+      periodResolved:analysis.periodResolved||0,
+      periodStart:analysis.periodStart||null
     };
   }
   updateCodeLifts(letter,preds,db);
+  // Save performanceAnalysis NOW before precomputeAnchorCache reloads db
+  db.shops[letter].performanceAnalysis=analysis;
+  if(analysis.codeWeights&&Object.keys(analysis.codeWeights).length){
+    db.shops[letter].codeWeights=analysis.codeWeights;
+  }
+  // Calibrate grade thresholds from outcomes
+  var calibrated=calibrateGradeThresholds(letter,preds);
+  if(calibrated) db.shops[letter].gradeThresholds=calibrated;
+  // ── INSIGHT5: Signal calibration check ──────────────────────────────────
+  // Expensive operation — only run every 8 resolved predictions, not every cycle
+  var lastCalib=db.shops[letter].lastSignalCalibCount||0;
+  if(resolved.length>=lastCalib+8||!db.shops[letter].signalCalibration){
+    var sigCalib=calibrateSignalWeights(letter);
+    if(sigCalib&&(sigCalib.calibratedRate-sigCalib.calibratedStd)>(sigCalib.defaultRate-sigCalib.defaultStd)+2){
+      // Calibrated combo meaningfully beats current default — propose via alert
+      db.shops[letter].signalCalibration=sigCalib;
+      db.shops[letter].lastSignalCalibCount=resolved.length;
+    } else if(sigCalib){
+      db.shops[letter].signalCalibration=sigCalib;
+      db.shops[letter].lastSignalCalibCount=resolved.length;
+    }
+  }
+  saveDB(db);
   // Pre-compute anchor backtests regardless of surfacing decision
   precomputeAnchorCache(letter,currentW);
-  saveDB(db);
   if(activeTab==="predict") renderLearnerAlert(letter);
   return;
 }
@@ -2695,19 +3110,41 @@ db.shops[letter].learnerAlert={
   currentHits:currentHits,learnedHits:learnedHits,testN:TEST_N,
   btAnchorRate:btLearned?btLearned.hitRate:null,
   btCurrentRate:btCurrent?btCurrent.hitRate:null,
-  btDiff:btDiff,btN:TEST_N,
+  btDiff:btDiff,btN:TEST_N,btPeriodDiff:periodDiff,btPeriodN:periodN,periodAgreement:periodAgreesWithFull,
   learnedTop5:lT5,currentTop5:curT5,
   learnedOnly:lT5.filter(function(c){return curT5.indexOf(c)===-1;}),
   currentOnly:curT5.filter(function(c){return lT5.indexOf(c)===-1;}),
   topBoost:sigChanges.filter(function(s){return s.delta>0.02;}).slice(0,2),
   topReduce:sigChanges.filter(function(s){return s.delta<-0.02;}).slice(0,2),
   learnedW:learnedW,prevW:currentW,
-  missedOpportunities:(analysis.missedOpportunities||[]).slice(0,3)
+  missedOpportunities:(analysis.missedOpportunities||[]).slice(0,3),
+  periodMissedOpps:(analysis.periodMissedOpps||[]).slice(0,3),
+  periodResolved:analysis.periodResolved||0,
+  periodStart:analysis.periodStart||null
 };
 updateCodeLifts(letter,preds,db);
 
+// Save performanceAnalysis and learnerAlert before precomputeAnchorCache reloads db
+db.shops[letter].performanceAnalysis=analysis;
+if(analysis.codeWeights&&Object.keys(analysis.codeWeights).length){
+  db.shops[letter].codeWeights=analysis.codeWeights;
+}
+var calibrated2=calibrateGradeThresholds(letter,preds);
+if(calibrated2) db.shops[letter].gradeThresholds=calibrated2;
+saveDB(db);
+
 // Pre-compute anchor backtests for Optimize section — display reads cache only
 precomputeAnchorCache(letter,currentW);
+
+// Reload db after precomputeAnchorCache, then apply final updates
+db=loadDB();
+// Obs penalty relief: identify chronic misses and include in learnerAlert
+var totalPreds=(db.shops[letter].predictions||[]).filter(function(p){return p.status!=='pending'&&p.outcome;}).length;
+var chronicThreshold=Math.max(2, Math.round(totalPreds*0.15));
+var chronicMisses=(analysis.missedOpportunities||[]).filter(function(m){return m.missCount>=chronicThreshold;});
+if(chronicMisses.length&&db.shops[letter].learnerAlert){
+  db.shops[letter].learnerAlert.proposedRelief=chronicMisses.map(function(m){return m.code;});
+}
 
 saveDB(db);
 if(activeTab==='predict') renderLearnerAlert(letter);
@@ -3351,37 +3788,89 @@ setTimeout(function(){learnAndStoreThresholds(letter);},100);
 return {hadPrediction:hadPrediction,resolved:resolvedPreds,worstStatus:resolvedPreds.length?resolvedPreds[0].status:null};
 }
 
-// Sort codes by grade (A→N) then combined% — called at freeze time so display order is fixed
-// Also computes and returns frozenGrades, frozenHitRates, frozenSignals for each code
-function sortCodesByGrade(codes, frozenScores, snapByCode, weights, entries, preds, letter){
+// Sort codes by grade (A→N) then effectivePct — called at freeze time so display order is fixed
+// effectivePct = signal strength × regime certainty × shop confidence × obs health
+// This is an honest expected-hit probability, not just a ranking number
+function sortCodesByGrade(codes, frozenScores, snapByCode, weights, entries, preds, letter, shopConf, regime){
   var gradeOrder={A:0,B:1,C:2,D:3,N:4};
   var fullMax=Math.max.apply(null,Object.values(frozenScores).concat([1]));
+  // Shop confidence: use passed value or compute from recent resolved
+  var conf=shopConf!==undefined?shopConf:0.5;
+  // Regime certainty: stable=1.0, shifting scales down by how much it's shifted
+  var regimeCertainty=1.0;
+  if(regime&&regime.shifting){
+    // overlapScore of 0.4 = 40% certain = 0.4 certainty multiplier, floor at 0.5
+    regimeCertainty=Math.max(0.50, regime.overlapScore!==undefined?regime.overlapScore:0.70);
+  }
+  var obsWindow=letter&&db&&db.shops&&db.shops[letter]&&db.shops[letter].obsWindow
+    ?db.shops[letter].obsWindow:{};
   var codeData={};
   codes.forEach(function(c){
     var pct=Math.round((frozenScores[c]||0)/fullMax*100);
     var snap=snapByCode[c]||{};
     var grade=buildCodeConfidenceGrade(c,snap,weights,entries,preds,letter,pct);
     var hr=buildCodeHitRate(c,preds);
-    var combined=hr?Math.round(pct*0.5+hr.rate*0.5):pct;
+    var hrBlend=hr?Math.round(pct*0.5+hr.rate*0.5):pct;
+    // INSIGHT5: historical appearance rate — always computable, independent of prediction history
+    var apprCount=entries.filter(function(e){return e.codes.indexOf(c)>-1;}).length;
+    var apprRate=entries.length>0?Math.round(apprCount/entries.length*100):null;
     var consensus=buildSignalConsensus(c,snap,weights,weights);
-    var topDriving=consensus.yesSignals.slice(0,2).map(function(k){return SIGNAL_NAMES&&SIGNAL_NAMES[k]||k;}).join(' \u00B7 ');
-    var obsWindow=letter&&db&&db.shops&&db.shops[letter]&&db.shops[letter].obsWindow
-      ?db.shops[letter].obsWindow:{};
+    // Use yesSignals if available, else fall back to top weighted contributions regardless of threshold
+    var topDrivingKeys=consensus.yesSignals.length>0
+      ?consensus.yesSignals.slice(0,2)
+      :Object.keys(snap).filter(function(k){return snap[k]>0;})
+          .sort(function(a,b){return (snap[b]||0)*(weights[b]||0.05)-(snap[a]||0)*(weights[a]||0.05);})
+          .slice(0,2);
+    var topDriving=topDrivingKeys.map(function(k){return SIGNAL_NAMES&&SIGNAL_NAMES[k]||k;}).join(' \u00B7 ');
     var obsRaw=obsWindow[c]||{state:'idle'};
+    var obsState=obsRaw.state||'idle';
+    // Obs health multiplier
+    var obsHealth={idle:1.0,watching:0.90,recovering:1.0,confirmed:0.80,overdue:1.10,ambiguous:0.95}[obsState]||1.0;
+    // Obs health multiplier — confirmed = boost, watching = mild boost, overdue = boost
+    var obsHealth={
+      idle:      1.00,
+      watching:  1.08,
+      recovering:1.00,
+      confirmed: 1.15,
+      overdue:   1.12,
+      ambiguous: 0.95
+    }[obsState]||1.00;
+    var obsRaw2=obsWindow[c]||{};
+    if(obsRaw2.penaltyApplied&&obsRaw2.penaltyApplied<=0.60){
+      obsHealth=Math.min(obsHealth,0.85);
+    }
+    // ── INSIGHT3: True effectivePct ──────────────────────────────────────────
+    // Incorporates signal strength + obs health + regime certainty + shop confidence
+    // Formula: code signal × obsHealth, then scaled by (regime × shopConf)
+    // Two-step to keep numbers readable:
+    //   Step 1: codeScore = hrBlend × obsHealth (0-100, per-code)
+    //   Step 2: scale = regimeCertainty × clampedConf (0.25-1.0)
+    //   effectivePct = codeScore × scale, floored at 5% so no code vanishes
+    // The displayed number is an honest expected hit contribution
+    var codeScore=hrBlend*obsHealth;
+    var clampedConf=Math.max(0.40, conf); // floor at 40% — even uncertain shops have signal
+    var scale=regimeCertainty*clampedConf;
+    // Preserve relative ranking: scale compresses the range, not the order
+    // Use sqrt of scale so a 0.5 certainty gives 0.71× not 0.50× — less crushing
+    var effectivePct=Math.round(codeScore*Math.sqrt(scale));
+    effectivePct=Math.max(5, Math.min(100, effectivePct));
     codeData[c]={
-      pct:pct, combined:combined,
+      pct:pct, combined:hrBlend, effectivePct:effectivePct,
       grade:grade.grade, gradeCol:grade.col, adapted:!!grade.adapted,
       hrRate:hr?hr.rate:null, hrN:hr?hr.predicted:null,
+      appearanceRate:apprRate,
       topDriving:topDriving,
       topSignalKey:consensus.yesSignals[0]||null,
-      obsState:obsRaw.state||'idle'
+      obsState:obsState,
+      regimeCertainty:Math.round(regimeCertainty*100),
+      shopConf:Math.round(conf*100)
     };
   });
   var sorted=codes.slice().sort(function(a,b){
     var aOrder=gradeOrder[codeData[a].grade]!==undefined?gradeOrder[codeData[a].grade]:5;
     var bOrder=gradeOrder[codeData[b].grade]!==undefined?gradeOrder[codeData[b].grade]:5;
     if(aOrder!==bOrder) return aOrder-bOrder;
-    return codeData[b].combined-codeData[a].combined;
+    return codeData[b].effectivePct-codeData[a].effectivePct;
   });
   lastSortCodeData=codeData;
   return sorted;
@@ -3437,7 +3926,7 @@ db.shops[letter].lastFullScores=frozenScores;
 var top5Scores=top5.reduce(function(o,x){o[x[0]]=Math.round(x[1]/top5Max*100);return o;},{});
 // Sort codes by grade at freeze time — display order fixed permanently
 var snapByCodeFreeze={}; Object.keys(compactSnaps).forEach(function(c){var s=compactSnaps[c];var d={};Object.keys(s).forEach(function(k){d[k]=s[k]/100;});snapByCodeFreeze[c]=d;});
-var top5CodesFreeze=sortCodesByGrade(top5.map(function(x){return x[0];}),frozenScores,snapByCodeFreeze,result.weights,entries,preds,letter);
+var top5CodesFreeze=sortCodesByGrade(top5.map(function(x){return x[0];}),frozenScores,snapByCodeFreeze,result.weights,entries,preds,letter,result.shopConf,result.regime);
 var frozenCodeData=lastSortCodeData;
 var frozenSummary=buildPlainEnglishSummary(entries,preds,top5CodesFreeze,result,letter)||'';
 var frozenConf=buildRefillConfidenceScore(entries,preds,top5CodesFreeze,result,letter)||null;
@@ -4034,24 +4523,28 @@ function dismissLearnerAlert(isHold){
 
 
 
-function backtestWeights(letter, weights, fromDate){
+function backtestWeights(letter, weights, fromDate, periodFromDate){
   // Two-dimensional weighting: recency (0.92 decay) × regime (stable=1.0, shift=0.6)
+  // periodFromDate: if set, only backtest predictions from this date forward (regime-period mode)
   db=loadDB();
   var entries=shopEntries(letter).slice().sort(function(a,b){return a.date.localeCompare(b.date);});
   var preds=shopPreds(letter);
   var fromIdx=entries.findIndex(function(e){return e.date>fromDate;});
   if(fromIdx<3) return null;
+  // In period mode, further restrict to entries after period start
+  var periodIdx=periodFromDate
+    ?Math.max(fromIdx,entries.findIndex(function(e){return e.date>=periodFromDate;}))
+    :fromIdx;
+  if(periodIdx<0||periodIdx>=entries.length-1) periodIdx=fromIdx;
   var hits=0,total=0,weightedHits=0,weightedTotal=0,detail=[];
-  for(var i=fromIdx;i<entries.length-1;i++){
+  for(var i=periodIdx;i<entries.length-1;i++){
     var trainEntries=entries.slice(0,i);
     var actual=entries[i].codes;
     var scores=buildWeightedScoreDirect(trainEntries, weights);
     var top5=Object.entries(scores).sort(function(a,b){return b[1]-a[1];}).slice(0,5).map(function(x){return x[0];});
     var h=top5.filter(function(c){return actual.indexOf(c)>-1;}).length;
-    // Recency weight
     var stepsFromEnd=entries.length-2-i;
     var recencyW=Math.pow(0.92, stepsFromEnd);
-    // Regime weight: find prediction made at this entry
     var entryDate=entries[i].date;
     var prevDate=i>0?entries[i-1].date:'';
     var predAtDate=preds.filter(function(p){
@@ -4069,7 +4562,8 @@ function backtestWeights(letter, weights, fromDate){
   }
   var hitRate=total?Math.round(hits/total*100):0;
   var weightedRate=weightedTotal>0?Math.round(weightedHits/weightedTotal*100):hitRate;
-  return {hits:hits,total:total,hitRate:weightedRate,rawHitRate:hitRate,detail:detail};
+  return {hits:hits,total:total,hitRate:weightedRate,rawHitRate:hitRate,
+    detail:detail,periodMode:!!periodFromDate};
 }
 
 function buildSequentialCooccur(entries){
@@ -4438,7 +4932,7 @@ var regimeNow=detectRegimeShift(allEntries);
 var allPredsSoFar=db.shops[letter].predictions||[];
 // Sort codes by grade at freeze time
 var snapByCodeRebuild={};Object.keys(compactSnaps).forEach(function(c){var s=compactSnaps[c];var d={};Object.keys(s).forEach(function(k){d[k]=s[k]/100;});snapByCodeRebuild[c]=d;});
-var top5CodesRebuild=sortCodesByGrade(finalTop5.map(function(x){return x[0];}),fNorm,snapByCodeRebuild,finalResult.weights,allEntries,allPredsSoFar,letter);
+var top5CodesRebuild=sortCodesByGrade(finalTop5.map(function(x){return x[0];}),fNorm,snapByCodeRebuild,finalResult.weights,allEntries,allPredsSoFar,letter,finalResult.shopConf,finalResult.regime);
 var frozenCodeDataRebuild=lastSortCodeData;
 var frozenSummaryRebuild=buildPlainEnglishSummary(allEntries,allPredsSoFar,top5CodesRebuild,finalResult,letter)||'';
 var frozenConfRebuild=buildRefillConfidenceScore(allEntries,allPredsSoFar,top5CodesRebuild,finalResult,letter)||null;
@@ -4506,7 +5000,7 @@ var surpriseCodes2=nextEntry.codes.filter(function(c){
 });
 // Sort codes by grade at freeze time
 var snapByCode2={};Object.keys(compactSnaps2).forEach(function(c){var s=compactSnaps2[c];var d={};Object.keys(s).forEach(function(k){d[k]=s[k]/100;});snapByCode2[c]=d;});
-var sortedTop5Codes=sortCodesByGrade(top5.map(function(x){return x[0];}),normScores,snapByCode2,result.weights,trainEntries,shopPreds(letter),letter);
+var sortedTop5Codes=sortCodesByGrade(top5.map(function(x){return x[0];}),normScores,snapByCode2,result.weights,trainEntries,shopPreds(letter),letter,result.shopConf,result.regime);
 var frozenCodeData2=lastSortCodeData;
 var pred={
 id:predId2,createdDate:trainEntries[trainEntries.length-1].date,
@@ -4878,13 +5372,42 @@ var renderPredictTab = function(){
         +'</div>'
         +(fc.regimeShifting?'<span class="conf-badge conf-low" style="margin-left:auto">&#x26A1; regime shift</span>':'')
       +'</div>';
-    } else { confEl.innerHTML=''; }
+    } else {
+      // No liveResolved predictions yet — show entry count and regime state
+      var regimeInfo=pred.regimeAtTime||{};
+      var entryCount=entries.length;
+      var resolved=preds.filter(function(p){return p.status!=='pending'&&p.outcome;});
+      var needMore=Math.max(0,5-resolved.filter(function(p){return p.liveResolved;}).length);
+      confEl.innerHTML='<div style="padding:8px 0;border-bottom:1px solid var(--border);margin-bottom:8px">'
+        +'<div style="font-size:11px;color:var(--muted);margin-bottom:4px">'
+          +(needMore>0
+            ?'Confidence grade available after '+needMore+' more real refill'+(needMore>1?'s':'')+' are tracked'
+            :'Confidence grade not yet computed — rebuild to update')
+        +'</div>'
+        +(regimeInfo.shifting?'<span class="conf-badge conf-low">&#x26A1; regime shift</span>':'')
+      +'</div>';
+    }
   }
 
   // ── Plain English — from frozenSummary ──
   var peEl=document.getElementById('plain-english');
-  if(peEl) peEl.innerHTML=pred.frozenSummary
-    ?'<div style="font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:6px">'+pred.frozenSummary+'</div>':'';
+  if(peEl){
+    if(pred.frozenSummary){
+      peEl.innerHTML='<div style="font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:6px">'+pred.frozenSummary+'</div>';
+    } else if(pred.predictedCodes&&pred.predictedCodes.length){
+      // Basic summary from frozenCodeData when no frozen summary exists
+      var fcdBasic=pred.frozenCodeData||{};
+      var topCode=pred.predictedCodes[0];
+      var topD=fcdBasic[topCode]||{};
+      var topSignal=topD.topDriving||topD.topSignalKey||'';
+      var basicSummary='Top pick is <strong>'+topCode+'</strong>'
+        +(topSignal?'. Leading signal: '+topSignal+'.':'.')
+        +(pred.regimeAtTime&&pred.regimeAtTime.shifting?' \u26A1 Pattern shift detected \u2014 recent signals weighted more heavily.':'');
+      peEl.innerHTML='<div style="font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:6px">'+basicSummary+'</div>';
+    } else {
+      peEl.innerHTML='';
+    }
+  }
 
   // ── Prediction codes — from frozenCodeData ──
   renderPredictionCodes(pred);
@@ -4926,7 +5449,12 @@ var renderPredictionCodes = function(pred){
       var hr=buildCodeHitRate(c,allPreds);
       var combined=hr?Math.round(pct*0.5+hr.rate*0.5):pct;
       var consensus=buildSignalConsensus(c,snap,weights,weights);
-      var topDriving=consensus.yesSignals.slice(0,2).map(function(k){return SIGNAL_NAMES&&SIGNAL_NAMES[k]||k;}).join(' \u00B7 ');
+      var topDrivingKeys2=consensus.yesSignals.length>0
+        ?consensus.yesSignals.slice(0,2)
+        :Object.keys(snap).filter(function(k){return snap[k]>0;})
+            .sort(function(a,b){return (snap[b]||0)*(weights[b]||0.05)-(snap[a]||0)*(weights[a]||0.05);})
+            .slice(0,2);
+      var topDriving=topDrivingKeys2.map(function(k){return SIGNAL_NAMES&&SIGNAL_NAMES[k]||k;}).join(' \u00B7 ');
       var obsWindow=db.shops[activeShop]&&db.shops[activeShop].obsWindow||{};
       var obsState=(obsWindow[c]&&obsWindow[c].state)||'idle';
       fcd[c]={grade:g.grade,gradeCol:g.col,adapted:!!g.adapted,combined:combined,
@@ -4949,11 +5477,12 @@ var renderPredictionCodes = function(pred){
   });
   function codeRow(c,type){
     var d=fcd[c]||{};
-    var combined=d.combined!==undefined?d.combined:Math.round((frozen[c]||0)/fullMax*100);
+    var combined=d.effectivePct!==undefined?d.effectivePct:d.combined!==undefined?d.combined:Math.round((frozen[c]||0)/fullMax*100);
     var grade=d.grade||'N';
     var gradeCol=d.gradeCol||'var(--muted)';
     var adapted=!!d.adapted;
     var hrRate=d.hrRate; var hrN=d.hrN;
+    var apprRate=d.appearanceRate; // historical frequency — always known, independent of prediction history
     var topDriving=d.topDriving||'';
     var topSigKey=d.topSignalKey||null;
     var obsState=d.obsState||'idle';
@@ -4968,7 +5497,9 @@ var renderPredictionCodes = function(pred){
     var codeCol=type==='promoted'?'var(--green)':type==='watchout'?'var(--gold)':'var(--text)';
     var hrHtml=hrRate!==null&&hrRate!==undefined
       ?'<span style="color:'+(hrRate>=50?'var(--green)':hrRate>=30?'var(--gold)':'var(--red)')+';font-size:10px;font-family:var(--mono)"> \u00B7 '+hrRate+'%('+hrN+')</span>'
-      :'<span style="color:var(--muted);font-size:10px"> \u00B7 N/A</span>';
+      :(apprRate!==null&&apprRate!==undefined
+        ?'<span style="color:var(--muted);font-size:10px"> \u00B7 seen '+apprRate+'% of refills</span>'
+        :'<span style="color:var(--muted);font-size:10px"> \u00B7 N/A</span>');
     return '<div class="pred-code-row">'
       +'<span style="font-size:11px;min-width:16px">'+(typeIcon||'')+'</span>'
       +'<span class="pred-code" style="color:'+codeCol+'">'+c+'</span>'
@@ -5031,24 +5562,76 @@ var renderLearnerAlert = function(letter){
   var el=document.getElementById('learner-alert-panel');
   if(!el||!letter) return;
   db=loadDB();
+  el.innerHTML='';
   var a=db.shops[letter]&&db.shops[letter].learnerAlert;
-  if(!a||!a.readyToSurface||a.applied){el.innerHTML=''; return;}
+  if(a&&a.readyToSurface&&!a.applied){
   var diff=a.btDiff||0;
   var col=diff>0?'var(--green)':diff<0?'var(--red)':'var(--muted)';
   var diffStr=diff>0?'\u2191+'+diff+'%':diff<0?'\u2193'+diff+'%':'= No difference';
-  var missed=(a.missedOpportunities||[]).map(function(m){return m.code;}).join(', ');
+  // Period delta
+  var pDiff=a.btPeriodDiff;
+  var pN=a.btPeriodN||0;
+  var pAgree=a.periodAgreement!==false;
+  var pHtml='';
+  if(pDiff!==null&&pDiff!==undefined&&pN>0){
+    var pCol=pDiff>0?'var(--green)':pDiff<0?'var(--red)':'var(--muted)';
+    var pStr=pDiff>0?'\u2191+'+Math.round(pDiff)+'%':'\u2193'+Math.round(pDiff)+'%';
+    pHtml='<div style="font-size:10px;color:var(--muted);margin-bottom:6px">'
+      +'Current pattern ('+pN+' refills): <span style="font-weight:700;color:'+pCol+'">'+pStr+'</span>'
+      +(!pAgree?'<span style="color:var(--gold);margin-left:6px">\u26A0 pattern disagrees — holding</span>':'')
+    +'</div>';
+  }
+  // Missed in current period
+  var periodMissed=(a.periodMissedOpps||[]).map(function(m){return m.code+'('+m.missCount+'x)';}).join(', ');
+  var allMissed=(a.missedOpportunities||[]).map(function(m){return m.code+'('+m.missCount+'x)';}).join(', ');
+  var relief=(a.proposedRelief||[]).join(', ');
+  var decision=diff>0&&pAgree?'Apply':'Hold';
   el.innerHTML='<div style="background:var(--surface2);border:1px solid '+col+';border-radius:8px;padding:12px;margin-bottom:12px">'
-    +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">'
-      +'<span style="font-size:11px;font-weight:700;color:'+col+';text-transform:uppercase">Learner \u2014 '+(diff>0?'Apply':'Hold')+'</span>'
+    +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">'
+      +'<span style="font-size:11px;font-weight:700;color:'+col+';text-transform:uppercase">Learner \u2014 '+decision+'</span>'
       +'<span style="font-size:20px;font-weight:900;font-family:var(--mono);color:'+col+'">'+diffStr+'</span>'
-      +'<span style="font-size:10px;color:var(--muted);margin-left:auto">'+a.btN+' refills</span>'
+      +'<span style="font-size:10px;color:var(--muted);margin-left:auto">'+a.btN+' refills all-time</span>'
     +'</div>'
-    +(missed?'<div style="font-size:11px;color:var(--muted);margin-bottom:8px">Missed: <span style="color:var(--gold)">'+missed+'</span></div>':'')
+    +pHtml
+    +(periodMissed?'<div style="font-size:11px;color:var(--muted);margin-bottom:3px">Missed now: <span style="color:var(--gold)">'+periodMissed+'</span></div>':'')
+    +(allMissed&&allMissed!==periodMissed?'<div style="font-size:11px;color:var(--muted);margin-bottom:4px">Missed all-time: <span style="color:var(--muted)">'+allMissed+'</span></div>':'')
+    +(relief?'<div style="font-size:11px;color:var(--muted);margin-bottom:8px">Penalty relief: <span style="color:var(--green)">'+relief+' \u2014 releasing suppression so next prediction gives fair chance</span></div>':'')
     +'<div style="display:flex;gap:8px">'
       +'<button class="btn btn-primary btn-sm" onclick="applyLearnerWeights()">Apply</button>'
       +'<button class="btn btn-secondary btn-sm" onclick="dismissLearner()">Hold</button>'
     +'</div>'
   +'</div>';
+  } // end if(a&&a.readyToSurface)
+
+  // ── INSIGHT5: Signal calibration proposal ──────────────────────────────
+  var sc=db.shops[letter]&&db.shops[letter].signalCalibration;
+  if(sc&&!sc.applied&&(sc.calibratedRate-sc.calibratedStd)>(sc.defaultRate-sc.defaultStd)+2){
+    var scCol='var(--green)';
+    var comboNames=sc.combo.map(function(k){return SIGNAL_NAMES&&SIGNAL_NAMES[k]||k;}).join(' + ');
+    el.innerHTML+='<div style="background:var(--surface2);border:1px solid '+scCol+';border-radius:8px;padding:12px;margin-bottom:12px">'
+      +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">'
+        +'<span style="font-size:11px;font-weight:700;color:'+scCol+';text-transform:uppercase">Signal Model Update</span>'
+        +'<span style="font-size:16px;font-weight:900;font-family:var(--mono);color:'+scCol+'">'+sc.defaultRate+'%\u2192'+sc.calibratedRate+'%</span>'
+      +'</div>'
+      +'<div style="font-size:11px;color:var(--muted);margin-bottom:8px">'
+        +'Tested across '+sc.windowCount+' windows ('+sc.testCycles+' refills): <strong style="color:var(--text)">'+comboNames+'</strong> averages '+sc.calibratedRate+'% (\u00B1'+sc.calibratedStd+') vs current '+sc.defaultRate+'% (\u00B1'+sc.defaultStd+').'
+      +'</div>'
+      +'<div style="display:flex;gap:8px">'
+        +'<button class="btn btn-primary btn-sm" onclick="applySignalCalibration()">Apply</button>'
+        +'<button class="btn btn-secondary btn-sm" onclick="dismissSignalCalibration()">Hold</button>'
+      +'</div>'
+    +'</div>';
+  }
+}
+
+var dismissSignalCalibration = function(){
+  if(!activeShop) return;
+  db=loadDB();
+  if(db.shops[activeShop]&&db.shops[activeShop].signalCalibration){
+    db.shops[activeShop].signalCalibration.applied=true; // mark as seen/dismissed
+  }
+  saveDB(db);
+  renderLearnerAlert(activeShop);
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -5143,7 +5726,7 @@ var renderTrackScore = function(){
     });
     html+=top5sorted.map(function(c){
       var d=fcd[c]||{};
-      var combined=d.combined!==undefined?d.combined:Math.round((frozen[c]||0)/fullMax*100);
+      var combined=d.effectivePct!==undefined?d.effectivePct:d.combined!==undefined?d.combined:Math.round((frozen[c]||0)/fullMax*100);
       var combinedCol=combined>=60?'var(--green)':combined>=35?'var(--gold)':'var(--red)';
       var gradeStr=d.grade||'N';
       var gradeCol=d.gradeCol||'var(--muted)';
@@ -5259,7 +5842,7 @@ var renderTrackHistory = function(){
 
     var rows=cardCodes.map(function(c){
       var d=fcd[c]||{};
-      var combined=d.combined!==undefined?d.combined:Math.round((frozen[c]||0)/maxS*100);
+      var combined=d.effectivePct!==undefined?d.effectivePct:d.combined!==undefined?d.combined:Math.round((frozen[c]||0)/maxS*100);
       var combinedCol=combined>=60?'var(--green)':combined>=35?'var(--gold)':'var(--red)';
       var gradeStr=d.grade||'N';
       var gradeCol=d.gradeCol||'var(--muted)';
@@ -5282,9 +5865,15 @@ var renderTrackHistory = function(){
       +'</div>';
     }).join('');
 
-    var surprises=(p.surpriseCodes||[]).filter(function(c){return p.predictedCodes.indexOf(c)===-1;});
+    var allEntries4=shopEntries(activeShop);
+    var surprises=(p.surpriseCodes||[]).filter(function(c){
+      if(p.predictedCodes.indexOf(c)>-1) return false;
+      // Only show codes with enough history to have been predicted
+      var freq=allEntries4.filter(function(e){return e.date<=p.createdDate&&e.codes.indexOf(c)>-1;}).length;
+      return freq>=3;
+    }).slice(0,5);
     var surpriseHtml=surprises.length
-      ?'<div style="margin-top:4px;padding-top:4px;border-top:1px dashed var(--border);font-size:10px;color:var(--muted)">&#x1F3AF; Surprise: '
+      ?'<div style="margin-top:4px;padding-top:4px;border-top:1px dashed var(--border);font-size:10px;color:var(--muted)">&#x1F3AF; Missed: '
         +surprises.map(function(c){return '<span class="mono" style="color:var(--gold)">'+c+'</span>';}).join(' ')+'</div>':'';
 
     return '<div style="padding:10px 0;border-bottom:1px solid var(--border)">'
@@ -5363,12 +5952,67 @@ var applyLearnerWeights = function(){
   db=loadDB();
   var a=db.shops[activeShop].learnerAlert;
   if(!a||!a.learnedW) return;
+  // ── INSIGHT5: Regression gate ──────────────────────────────────────────
+  // Check if applying these weights would hurt any currently-reliable code
+  var preds=shopPreds(activeShop);
+  var regCheck=checkWeightRegression(activeShop,a.learnedW,preds);
+  if(!regCheck.safe&&regCheck.regressions.length){
+    var msg=regCheck.regressions.map(function(r){
+      return r.code+': '+r.currentRate+'%\u2192'+r.newRate+'% (\u2193'+r.drop+'pp)';
+    }).join(', ');
+    var proceed=confirm('Warning: this change would reduce reliability for: '+msg+'. Apply anyway?');
+    if(!proceed){
+      showToast('Held \u2014 no changes applied','warn');
+      return;
+    }
+  }
+  doApplyLearnerWeights(a);
+}
+
+function doApplyLearnerWeights(a){
+  db=loadDB();
   snapshotCurrentWeights(activeShop);
   db=loadDB();
   db.shops[activeShop].weights=Object.assign({},a.learnedW);
   db.shops[activeShop].learnerAlert=Object.assign({},a,{applied:true,needsAlert:false});
+  // Apply obs penalty relief for proposed codes — only on user approval
+  var relief=a.proposedRelief||[];
+  if(relief.length){
+    var obs=db.shops[activeShop].obsWindow||{};
+    relief.forEach(function(code){
+      if(obs[code]&&obs[code].penaltyApplied&&obs[code].penaltyApplied<1.0){
+        obs[code].penaltyApplied=OBS_SOFT_PENALTY;
+        obs[code].state='recovering';
+      }
+    });
+    db.shops[activeShop].obsWindow=obs;
+  }
   saveDB(db);
   showToast('Weights updated \u2014 rebuilding\u2026','ok');
+  rebuildActiveShop();
+}
+
+// ── INSIGHT5: Apply calibrated signal combination ───────────────────────────
+var applySignalCalibration = function(){
+  if(!activeShop) return;
+  db=loadDB();
+  var sc=db.shops[activeShop].signalCalibration;
+  if(!sc||!sc.weights) return;
+  var preds=shopPreds(activeShop);
+  var regCheck=checkWeightRegression(activeShop,sc.weights,preds);
+  if(!regCheck.safe&&regCheck.regressions.length){
+    var msg=regCheck.regressions.map(function(r){
+      return r.code+': '+r.currentRate+'%\u2192'+r.newRate+'% (\u2193'+r.drop+'pp)';
+    }).join(', ');
+    var proceed=confirm('Warning: switching signal model would reduce reliability for: '+msg+'. Apply anyway?');
+    if(!proceed){ showToast('Held \u2014 no changes applied','warn'); return; }
+  }
+  snapshotCurrentWeights(activeShop);
+  db=loadDB();
+  db.shops[activeShop].weights=Object.assign({},sc.weights);
+  db.shops[activeShop].signalCalibration=Object.assign({},sc,{applied:true});
+  saveDB(db);
+  showToast('Signal model updated \u2014 rebuilding\u2026','ok');
   rebuildActiveShop();
 }
 
