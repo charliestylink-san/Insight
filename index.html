@@ -2087,10 +2087,14 @@ var consensus=buildSignalConsensus(code, snap, weights, weights);
 var consVal=consensus.score/100;
 var thresh=buildScoreThreshold(code,entries,preds);
 var threshVal=0;
+var invertedPattern=false;
 if(thresh&&thresh.reliability!=='insufficient'){
 threshVal=scorePct>=(thresh.thresholdPct||50)
 ?(thresh.hitRateAbove||50)/100
 :(thresh.hitRateBelowThreshold||20)/100;
+// INSIGHT5: flag when this code's history shows the opposite of the usual
+// high-score-means-likely relationship, so display can warn instead of mislead
+if(thresh.lift!==undefined&&thresh.lift<-10) invertedPattern=true;
 } else {
 var appRate=buildAppearanceRate(entries);
 threshVal=(appRate[code]||0)*0.67;
@@ -2098,9 +2102,11 @@ threshVal=(appRate[code]||0)*0.67;
 var bias=buildBias(preds);
 var biasVal=bias[code]!==undefined?bias[code]:0.5;
 var obs=letter?(shopObs(letter)[code]||{state:'idle'}):{state:'idle'};
-// New directional obs: confirmed/watching = hits (boost grade), overdue = misses (reduce grade)
-var obsPenalty={idle:0,watching:-10,recovering:0,confirmed:-20,overdue:25,ambiguous:0}[obs.state]||0;
-var obsVal=Math.max(0,Math.min(130,100-obsPenalty))/100;
+// INSIGHT5 fix: obs penalty direction was contradicting effectivePct's obsHealth multiplier.
+// effectivePct boosts watching/confirmed/overdue (appearance signals deserve confidence).
+// Grade now uses the same direction — confirmed/watching/overdue all boost, ambiguous mild penalty.
+var obsPenalty={idle:0,watching:8,recovering:0,confirmed:15,overdue:12,ambiguous:-5}[obs.state]||0;
+var obsVal=Math.max(0,Math.min(130,100+obsPenalty))/100;
 var momVal=Math.min(1,Math.max(0,snap.momentum||0.5));
 var w={consensus:0.25, threshold:0.30, bias:0.25, obs:0.15, momentum:0.05};
 var resolvedAll=preds.filter(function(p){
@@ -2184,7 +2190,8 @@ breakdown.push({label:'Momentum',   pts:Math.round(momVal*w.momentum*100),     m
 detail:momVal>=0.65?'&#x2191; Emerging':momVal<=0.35?'&#x2193; Fading':'Stable'});
 var score=pts;
 return {score:score,grade:grade,col:col,pts:score,maxPts:100,breakdown:breakdown,
-consensus:consensus,obsState:obs.state,weights:w,adapted:resolvedAll.length>=5};
+consensus:consensus,obsState:obs.state,weights:w,adapted:resolvedAll.length>=5,
+invertedPattern:invertedPattern};
 }
 
 function buildRefillConfidenceScore(entries, preds, top5Codes, bcsResult, letter){
@@ -2204,9 +2211,10 @@ var consVal=top5Codes.length?consensusSum/top5Codes.length:0.5;
 var obsPenSum=0;
 top5Codes.forEach(function(c){
 var st=(obs[c]||{state:'idle'}).state;
-obsPenSum+={confirmed:-20,watching:-10,recovering:0,idle:0,overdue:25,ambiguous:0}[st]||0;
+// INSIGHT5 fix: aligned with effectivePct and code-level grade — watching/confirmed/overdue boost
+obsPenSum+={confirmed:15,watching:8,recovering:0,idle:0,overdue:12,ambiguous:-5}[st]||0;
 });
-var obsVal=Math.max(0,1-(obsPenSum/top5Codes.length)/100);
+var obsVal=Math.max(0,Math.min(1.3,1+(obsPenSum/top5Codes.length)/100));
 var last5=resolved.slice(-5);
 var recentVal=0;
 if(last5.length>=3){
@@ -3824,8 +3832,6 @@ function sortCodesByGrade(codes, frozenScores, snapByCode, weights, entries, pre
     var topDriving=topDrivingKeys.map(function(k){return SIGNAL_NAMES&&SIGNAL_NAMES[k]||k;}).join(' \u00B7 ');
     var obsRaw=obsWindow[c]||{state:'idle'};
     var obsState=obsRaw.state||'idle';
-    // Obs health multiplier
-    var obsHealth={idle:1.0,watching:0.90,recovering:1.0,confirmed:0.80,overdue:1.10,ambiguous:0.95}[obsState]||1.0;
     // Obs health multiplier — confirmed = boost, watching = mild boost, overdue = boost
     var obsHealth={
       idle:      1.00,
@@ -3857,6 +3863,7 @@ function sortCodesByGrade(codes, frozenScores, snapByCode, weights, entries, pre
     codeData[c]={
       pct:pct, combined:hrBlend, effectivePct:effectivePct,
       grade:grade.grade, gradeCol:grade.col, adapted:!!grade.adapted,
+      invertedPattern:!!grade.invertedPattern,
       hrRate:hr?hr.rate:null, hrN:hr?hr.predicted:null,
       appearanceRate:apprRate,
       topDriving:topDriving,
@@ -5495,11 +5502,15 @@ var renderPredictionCodes = function(pred){
     else if(obsState==='recovering'){obsLabel='RECOVERING';obsCol='var(--muted)';}
     var typeIcon=type==='promoted'?'&#x1F52C;':type==='watchout'?'&#x26A0;&#xFE0F;':'';
     var codeCol=type==='promoted'?'var(--green)':type==='watchout'?'var(--gold)':'var(--text)';
+    var inverted=!!d.invertedPattern;
     var hrHtml=hrRate!==null&&hrRate!==undefined
       ?'<span style="color:'+(hrRate>=50?'var(--green)':hrRate>=30?'var(--gold)':'var(--red)')+';font-size:10px;font-family:var(--mono)"> \u00B7 '+hrRate+'%('+hrN+')</span>'
       :(apprRate!==null&&apprRate!==undefined
         ?'<span style="color:var(--muted);font-size:10px"> \u00B7 seen '+apprRate+'% of refills</span>'
         :'<span style="color:var(--muted);font-size:10px"> \u00B7 N/A</span>');
+    var invertedHtml=inverted
+      ?'<div style="font-size:9px;color:var(--gold);margin-left:24px;margin-top:1px">\u26A0 inverted pattern \u2014 lower scores have hit more often for this code</div>'
+      :'';
     return '<div class="pred-code-row">'
       +'<span style="font-size:11px;min-width:16px">'+(typeIcon||'')+'</span>'
       +'<span class="pred-code" style="color:'+codeCol+'">'+c+'</span>'
@@ -5510,7 +5521,7 @@ var renderPredictionCodes = function(pred){
       +'<div class="pred-bar-track"><div class="pred-bar-fill" style="width:'+combined+'%;background:'+barCol+'"></div></div>'
       +'<span class="pred-pct" style="color:'+combinedCol+';font-weight:700">'+combined+'%'+hrHtml+'</span>'
       +'<span class="pred-sigs" style="font-size:9px;color:var(--muted)">'+topDriving+'</span>'
-    +'</div>';
+    +'</div>'+invertedHtml;
   }
 
   var html=displayCodes.map(function(c){return codeRow(c,'top5');}).join('');
