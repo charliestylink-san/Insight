@@ -1854,8 +1854,14 @@ var below = pairs.filter(function(x){return x.score<threshold;});
 var aboveHitRate = above.length ? Math.round(above.filter(function(x){return x.hit;}).length/above.length*100) : null;
 var belowHitRate = below.length ? Math.round(below.filter(function(x){return x.hit;}).length/below.length*100) : null;
 var lift = aboveHitRate!==null && belowHitRate!==null ? aboveHitRate - belowHitRate : 0;
-var reliability = resolved.length >= 10 && lift >= 30 ? 'proven'
-: resolved.length >= 5  && lift >= 15 ? 'emerging'
+// INSIGHT5 fix: a strong NEGATIVE lift is just as meaningful as a strong positive one —
+// it means this code's score has been inversely related to outcome. Previously only
+// |lift|>=15/30 in the positive direction counted as reliable; negative lift fell
+// through to appearance-rate fallback, silently discarding the inverted-pattern signal.
+var absLift=Math.abs(lift);
+var reliability = resolved.length >= 10 && absLift >= 30 ? 'proven'
+: resolved.length >= 4   && absLift >= 40 ? 'emerging' // small-N but strong, consistent inversion
+: resolved.length >= 5   && absLift >= 15 ? 'emerging'
 : 'insufficient';
 var lowScorers = pairs.filter(function(x){return x.score<=30;});
 var lowHitRate = lowScorers.length ? Math.round(lowScorers.filter(function(x){return x.hit;}).length/lowScorers.length*100) : null;
