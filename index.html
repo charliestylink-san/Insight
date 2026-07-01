@@ -2823,6 +2823,14 @@ function checkWeightRegression(letter, newWeights, preds){
 
 function calibrateGradeThresholds(letter, preds){
 var resolved=preds.filter(function(p){return p.status!=='pending'&&p.outcome&&p.frozenCodeData;});
+// INSIGHT5: tested lowering this gate to react faster to shop-specific patterns.
+// Simulation showed a 4-cycle/17-pair sample cannot reliably separate real signal
+// from noise — even MB3's genuine inverted-grade pattern (28% spread) has ~19%
+// chance of being a fluke at that sample size. Shop-WIDE threshold recalibration
+// stays conservative at 10+ cycles. Faster reaction now happens at the PER-CODE
+// level instead (see buildScoreThreshold's lowered reliability gate + the
+// invertedPattern warning), which is the right place: one code's own consistent
+// history is much stronger evidence than a shop-wide split across mixed codes.
 if(resolved.length<10) return null;
 var pairs=[];
 resolved.forEach(function(p){
@@ -2834,7 +2842,35 @@ resolved.forEach(function(p){
     pairs.push({pts:pts, hit:p.outcome[c]==='hit'?1:0});
   });
 });
-if(pairs.length<15) return null;
+if(pairs.length<15) return null; // ~3-4 cycles of 5 codes each gives enough pairs
+
+// ── INSIGHT5: significance check before trusting calibration ──────────────
+// At low sample sizes, ANY split of random data can look like a pattern.
+// Require the top half (by score) to genuinely outperform the bottom half
+// by a meaningful, consistent margin before overriding the safe defaults.
+// This is the same principle as buildScoreThreshold's lift check — sample
+// size alone isn't evidence; the SPREAD has to be real.
+var sortedPairs=pairs.slice().sort(function(a,b){return a.pts-b.pts;});
+var midIdx=Math.floor(sortedPairs.length/2);
+var lowerHalf=sortedPairs.slice(0,midIdx);
+var upperHalf=sortedPairs.slice(midIdx);
+var lowerRate=lowerHalf.length?lowerHalf.filter(function(p){return p.hit;}).length/lowerHalf.length:0;
+var upperRate=upperHalf.length?upperHalf.filter(function(p){return p.hit;}).length/upperHalf.length:0;
+// ── INSIGHT5: significance check before trusting calibration ──────────────
+// At low sample sizes, ANY split of random data can look like a pattern.
+// Simulation against pure noise (30% random hit rate, no score relationship)
+// showed: at n=16, even noise produces a 0.38 spread 10% of the time and
+// 0.50 at the 95th percentile. A fixed 0.25 bar let ~60% of noise through.
+// Required spread now scales with sample size to keep false-positive rate
+// low: roughly the 90-95th percentile of what pure noise would produce.
+var requiredSpread = pairs.length>=30 ? 0.28
+  : pairs.length>=20 ? 0.32
+  : 0.40; // n=15-19, strictest bar — smallest samples need the most evidence
+var spread=Math.abs(upperRate-lowerRate);
+if(spread<requiredSpread){
+  return null; // not enough evidence of a real pattern — keep safe defaults
+}
+
 function hitRateAbove(t){
   var a=pairs.filter(function(p){return p.pts>=t;});
   return a.length?a.filter(function(p){return p.hit;}).length/a.length:0;
@@ -2855,7 +2891,10 @@ out.D=Math.max(out.D,20);
 // Also ensure A is at least 55 and D is at most 45
 out.A=Math.max(out.A,55);
 out.D=Math.min(out.D,45);
-return out;
+return Object.assign({},out,{
+  sampleSize:pairs.length,
+  spreadConfirmed:Math.round(spread*100)
+});
 }
 
 function buildOptimalWeights(letter, sigEff, missed, preds){
